@@ -19,15 +19,14 @@
           llvm = pkgs.llvmPackages_22;
         in
         {
-          default = pkgs.mkShell {
+          default = (pkgs.mkShell.override { stdenv = llvm.stdenv; }  {
             packages = [
               pkgs.git
               pkgs.cmake
               pkgs.ninja
-              llvm.clang
               llvm.clang-tools
             ];
-          };
+          });
         });
     };
 }
