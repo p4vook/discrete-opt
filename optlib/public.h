@@ -3,11 +3,11 @@
 #include <memory>
 
 struct Scheduler {
-  virtual bool ShouldShift(double score_delta) = 0;
+  virtual bool ShouldShift(double from_score, double to_score) = 0;
 
-  virtual void Cool() = 0;
+  virtual void CoolDown() = 0;
 
-  virtual bool Cold() = 0;
+  virtual bool IsFrozen() = 0;
 
   virtual ~Scheduler() = default;
 };
