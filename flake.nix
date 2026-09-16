@@ -25,6 +25,7 @@
               pkgs.cmake
               pkgs.ninja
               llvm.clang-tools
+              pkgs.typst
             ];
           });
         });
