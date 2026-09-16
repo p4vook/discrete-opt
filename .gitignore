@@ -137,6 +137,16 @@ celerybeat.pid
 # Environments
 .env
 .envrc
+
+# Keep only the configured set-cover evaluation inputs in version control.
+tasks/setcover/data/*
+!tasks/setcover/data/sc_157_0
+!tasks/setcover/data/sc_330_0
+!tasks/setcover/data/sc_1000_11
+!tasks/setcover/data/sc_5000_1
+!tasks/setcover/data/sc_10000_5
+!tasks/setcover/data/sc_10000_2
+
 .venv
 env/
 venv/
