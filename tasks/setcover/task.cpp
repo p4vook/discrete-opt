@@ -1,16 +1,16 @@
 #include "optlib/anneal.h"
 #include "optlib/accept.h"
+#include "optlib/fenwick.h"
 #include "optlib/random.h"
 #include "optlib/sched.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
-#include <cstdint>
 #include <fstream>
 #include <iostream>
 #include <numeric>
 #include <random>
-#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -217,6 +217,25 @@ public:
                                  " is not covered by any set");
       }
     }
+    set_utilities_.reserve(sets_.size());
+    for (int set = 0; set < static_cast<int>(sets_.size()); ++set) {
+      long double covered_element_weight = 0;
+      for (int element : sets_[set]) {
+        covered_element_weight +=
+            1.0L / static_cast<long double>(sets_for_element_[element].size());
+      }
+      set_utilities_.push_back(covered_element_weight / set_costs_[set]);
+    }
+    replacement_samplers_.reserve(sets_for_element_.size());
+    for (const auto &covering_sets : sets_for_element_) {
+      std::vector<long double> weights;
+      weights.reserve(covering_sets.size());
+      for (int set : covering_sets) {
+        weights.push_back(set_utilities_[set]);
+      }
+      replacement_samplers_.emplace_back(std::move(weights));
+    }
+    normalization_rank_.assign(sets_.size(), -1);
     state_ = std::make_unique<SetCover>(std::move(covered_by), set_costs_);
   }
 
@@ -315,6 +334,15 @@ public:
   }
 
   Candidate *Next() override {
+    bool normalize = ShouldNormalize();
+    auto start = std::chrono::steady_clock::now();
+    Candidate *candidate = normalize ? Normalize() : RemoveSet();
+    ObserveMoveTime(normalize, std::chrono::steady_clock::now() - start);
+    return candidate;
+  }
+
+private:
+  Candidate *RemoveSet() {
     std::vector<int> removable_sets;
     for (int set : state_->active_sets) {
       if (CanRemove(set)) {
@@ -343,7 +371,67 @@ public:
     return pending_.get();
   }
 
-private:
+  Candidate *Normalize() {
+    std::fill(normalization_rank_.begin(), normalization_rank_.end(), -1);
+    std::vector<int> order = state_->active_sets;
+    std::shuffle(order.begin(), order.end(), random_);
+    for (int rank = 0; rank < static_cast<int>(order.size()); ++rank) {
+      normalization_rank_[order[rank]] = rank;
+    }
+
+    std::vector<std::pair<int, int>> changes;
+    for (int element = 0; element < static_cast<int>(sets_for_element_.size());
+         ++element) {
+      int replacement = state_->covered_by[element];
+      int best_rank = normalization_rank_[replacement];
+      for (int set : sets_for_element_[element]) {
+        int rank = normalization_rank_[set];
+        if (rank != -1 && rank < best_rank) {
+          replacement = set;
+          best_rank = rank;
+        }
+      }
+      if (replacement != state_->covered_by[element]) {
+        changes.emplace_back(element, state_->covered_by[element]);
+        state_->Reassign(element, replacement);
+      }
+    }
+    pending_ =
+        std::make_unique<SetRemovalCandidate>(*state_, std::move(changes));
+    return pending_.get();
+  }
+
+  bool ShouldNormalize() {
+    constexpr long double target_fraction = 0.1L;
+    if (normalization_samples_ == 0) {
+      return std::bernoulli_distribution(0.01)(random_);
+    }
+    if (removal_samples_ == 0) {
+      return false;
+    }
+    long double removal_average = removal_seconds_ / removal_samples_;
+    long double normalization_average =
+        normalization_seconds_ / normalization_samples_;
+    long double probability =
+        target_fraction * removal_average /
+        ((1.0L - target_fraction) * normalization_average +
+         target_fraction * removal_average);
+    return std::bernoulli_distribution(static_cast<double>(probability))(random_);
+  }
+
+  void ObserveMoveTime(bool normalization,
+                       std::chrono::steady_clock::duration elapsed) {
+    long double seconds =
+        std::chrono::duration<long double>(elapsed).count();
+    if (normalization) {
+      normalization_seconds_ += seconds;
+      ++normalization_samples_;
+    } else {
+      removal_seconds_ += seconds;
+      ++removal_samples_;
+    }
+  }
+
   int Pick(const std::vector<int> &choices) {
     return RandomChoice(choices, random_);
   }
@@ -375,19 +463,36 @@ private:
   }
 
   int PickDifferentCoveringSet(int element, int excluded_set) {
-    std::vector<int> choices;
-    for (int set : sets_for_element_[element]) {
-      if (set != excluded_set) {
-        choices.push_back(set);
-      }
+    const auto &choices = sets_for_element_[element];
+    auto excluded = std::find(choices.begin(), choices.end(), excluded_set);
+    if (excluded == choices.end()) {
+      throw std::logic_error("excluded set does not cover the element");
     }
-    return Pick(choices);
+    std::size_t excluded_index = excluded - choices.begin();
+    FenwickTree &sampler = replacement_samplers_[element];
+    sampler.Set(excluded_index, 0);
+    long double total = sampler.Total();
+    std::uniform_real_distribution<long double> distribution(0, total);
+    long double value = distribution(random_);
+    if (value >= total) {
+      value = std::nextafter(total, 0.0L);
+    }
+    int replacement = choices[sampler.IndexForCumulativeWeight(value)];
+    sampler.Set(excluded_index, set_utilities_[excluded_set]);
+    return replacement;
   }
 
   std::vector<std::vector<int>> sets_;
   std::vector<std::vector<int>> sets_for_element_;
   std::vector<long double> set_costs_;
   std::vector<long double> original_set_costs_;
+  std::vector<long double> set_utilities_;
+  std::vector<FenwickTree> replacement_samplers_;
+  std::vector<int> normalization_rank_;
+  std::size_t removal_samples_ = 0;
+  std::size_t normalization_samples_ = 0;
+  long double removal_seconds_ = 0;
+  long double normalization_seconds_ = 0;
   std::vector<int> original_set_indices_;
   std::unique_ptr<SetCover> state_;
   std::unique_ptr<SetRemovalCandidate> pending_;
@@ -420,9 +525,19 @@ int main(int argc, char *argv[]) {
   try {
     auto space = std::make_unique<SetCoverSpace>(ParseInstance(input));
     SetCoverSpace *space_view = space.get();
-    Annealer annealer(std::move(space), std::make_unique<ExpDecayScheduler>(),
+    Annealer annealer(std::move(space),
+                      std::make_unique<ExpDecayScheduler>(1.0L, 0.9999995L,
+                                                          0.0001L),
                       std::make_unique<MetropolisAcceptPolicy>());
     auto solution = annealer.Run();
+    const auto &stats = annealer.Stats();
+    std::cerr << "anneal stats: iterations=" << stats.iterations
+              << " accepted=" << stats.accepted
+              << " rejected=" << stats.rejected
+              << " best_updates=" << stats.best_updates
+              << " initial_score=" << stats.initial_score
+              << " final_score=" << stats.final_score
+              << " best_score=" << stats.best_score << '\n';
     const auto *set_cover_solution = dynamic_cast<const SetCover *>(solution.get());
     if (set_cover_solution == nullptr || !space_view->IsValid(*set_cover_solution)) {
       throw std::runtime_error("annealer produced an invalid solution");

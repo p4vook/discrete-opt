@@ -29,11 +29,11 @@ points_for() {
     if [[ $(basename "${eval_instances[index]}") != "$name" ]]; then
       continue
     fi
-    awk -v score="$score" -v five="${eval_five_thresholds[index]}" \
-        -v seven="${eval_seven_thresholds[index]}" '
+    awk -v score="$score" -v three="${eval_three_thresholds[index]}" \
+        -v five="${eval_five_thresholds[index]}" '
       BEGIN {
-        if (score <= seven) print 7;
-        else if (score <= five) print 5;
+        if (score <= five) print 5;
+        else if (score <= three) print 3;
         else print 0;
       }
     '
@@ -112,7 +112,17 @@ for instance in "${instances[@]}"; do
   cat "$output_dir/$(basename "$instance").tsv" >> "$table"
 done
 
-cat "$table"
 total_points=$(awk -F '\t' 'NR > 1 { total += $4 } END { print total + 0 }' "$table")
-max_points=$(( ${#eval_instances[@]} * 7 ))
-printf 'total_points\t%s / %s\n' "$total_points" "$max_points"
+max_points=$(( ${#eval_instances[@]} * 5 ))
+{
+  printf '#table(\n'
+  printf '  columns: (1fr, auto, auto, auto),\n'
+  printf '  table.header([*Instance*], [*Cost score*], [*CPU time, s*], [*Points*]),\n'
+  while IFS=$'\t' read -r instance score cpu_seconds points; do
+    [[ $instance == instance ]] && continue
+    printf '  [`%s`], [%s], [%s], [%s],\n' \
+      "$instance" "$score" "$cpu_seconds" "$points"
+  done < "$table"
+  printf ')\n\n'
+  printf '*Total: %s / %s*\n' "$total_points" "$max_points"
+}
