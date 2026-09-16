@@ -2,10 +2,13 @@
 
 #include "optlib/public.h"
 
+#include <cstdint>
 #include <random>
 
 class MetropolisAcceptPolicy : public AcceptPolicy {
 public:
+  explicit MetropolisAcceptPolicy(std::uint32_t seed);
+
   bool ShouldShift(double from_score, double to_score,
                    long double temperature) override;
 

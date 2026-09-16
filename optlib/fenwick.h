@@ -5,7 +5,10 @@
 
 class FenwickTree {
 public:
+  FenwickTree() = default;
   explicit FenwickTree(std::vector<long double> weights);
+
+  void Reset(const std::vector<long double> &weights);
 
   void Set(std::size_t index, long double weight);
 

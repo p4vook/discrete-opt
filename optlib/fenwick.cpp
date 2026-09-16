@@ -13,6 +13,17 @@ FenwickTree::FenwickTree(std::vector<long double> weights)
   }
 }
 
+void FenwickTree::Reset(const std::vector<long double> &weights) {
+  weights_ = weights;
+  tree_.assign(weights_.size() + 1, 0);
+  for (std::size_t index = 0; index < weights_.size(); ++index) {
+    if (weights_[index] < 0) {
+      throw std::invalid_argument("FenwickTree weights must be non-negative");
+    }
+    Add(index, weights_[index]);
+  }
+}
+
 void FenwickTree::Set(std::size_t index, long double weight) {
   if (index >= weights_.size() || weight < 0) {
     throw std::invalid_argument("invalid FenwickTree weight update");

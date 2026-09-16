@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <fstream>
 #include <iostream>
 #include <numeric>
@@ -13,6 +14,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 struct SetCoverInstance {
@@ -92,13 +94,17 @@ struct SetCover : State {
   long double total_cost = 0;
   std::vector<std::vector<int>> assigned_elements;
   std::vector<int> assignment_positions;
+  const std::vector<std::vector<int>> *sets;
+  std::vector<int> active_cover_count;
 
-  SetCover(std::vector<int> covered_by_, std::vector<long double> set_costs_)
+  SetCover(std::vector<int> covered_by_, std::vector<long double> set_costs_,
+           const std::vector<std::vector<int>> &sets_)
       : covered_by(std::move(covered_by_)), set_usage(set_costs_.size()),
         active_positions(set_costs_.size(), -1),
         set_costs(std::move(set_costs_)),
         assigned_elements(set_usage.size()),
-        assignment_positions(covered_by.size()) {
+        assignment_positions(covered_by.size()), sets(&sets_),
+        active_cover_count(covered_by.size()) {
     for (int element = 0; element < static_cast<int>(covered_by.size());
          ++element) {
       int set = covered_by[element];
@@ -149,6 +155,9 @@ private:
     active_positions[set] = active_sets.size();
     active_sets.push_back(set);
     total_cost += set_costs[set];
+    for (int element : (*sets)[set]) {
+      ++active_cover_count[element];
+    }
   }
 
   void Deactivate(int set) {
@@ -159,16 +168,24 @@ private:
     active_sets.pop_back();
     active_positions[set] = -1;
     total_cost -= set_costs[set];
+    for (int element : (*sets)[set]) {
+      --active_cover_count[element];
+    }
   }
 };
 
 class SetRemovalCandidate : public Candidate {
 public:
   SetRemovalCandidate(SetCover &state,
-                      std::vector<std::pair<int, int>> changes)
-      : state_(state), changes_(std::move(changes)) {}
+                      std::vector<std::pair<int, int>> changes,
+                      bool &removal_cache_valid)
+      : state_(state), changes_(std::move(changes)),
+        removal_cache_valid_(removal_cache_valid) {}
 
-  void Accept() override { changes_.clear(); }
+  void Accept() override {
+    changes_.clear();
+    removal_cache_valid_ = false;
+  }
 
   void Reject() override {
     for (auto it = changes_.rbegin(); it != changes_.rend(); ++it) {
@@ -180,11 +197,13 @@ public:
 private:
   SetCover &state_;
   std::vector<std::pair<int, int>> changes_;
+  bool &removal_cache_valid_;
 };
 
 class SetCoverSpace : public StateSpace {
 public:
-  explicit SetCoverSpace(SetCoverInstance instance) {
+  explicit SetCoverSpace(SetCoverInstance instance, std::uint32_t seed)
+      : random_(seed) {
     std::vector<int> order(instance.sets.size());
     std::iota(order.begin(), order.end(), 0);
     std::shuffle(order.begin(), order.end(), random_);
@@ -234,7 +253,8 @@ public:
       }
       replacement_samplers_.emplace_back(std::move(weights));
     }
-    state_ = std::make_unique<SetCover>(std::move(covered_by), set_costs_);
+    state_ =
+        std::make_unique<SetCover>(std::move(covered_by), set_costs_, sets_);
   }
 
   State *Current() const override { return state_.get(); }
@@ -264,7 +284,9 @@ public:
         solution.active_positions.size() != sets_.size() ||
         solution.set_costs != set_costs_ ||
         solution.assigned_elements.size() != sets_.size() ||
-        solution.assignment_positions.size() != sets_for_element_.size()) {
+        solution.assignment_positions.size() != sets_for_element_.size() ||
+        solution.active_cover_count.size() != sets_for_element_.size() ||
+        solution.sets != &sets_) {
       return false;
     }
 
@@ -318,6 +340,17 @@ public:
         return false;
       }
     }
+    std::vector<int> active_cover_count(sets_for_element_.size());
+    for (int set = 0; set < static_cast<int>(sets_.size()); ++set) {
+      if (is_active[set]) {
+        for (int element : sets_[set]) {
+          ++active_cover_count[element];
+        }
+      }
+    }
+    if (active_cover_count != solution.active_cover_count) {
+      return false;
+    }
     long double total_cost = 0;
     for (int set = 0; set < static_cast<int>(sets_.size()); ++set) {
       if (usage[set] > 0) {
@@ -337,19 +370,38 @@ public:
 
 private:
   Candidate *RemoveSet() {
-    std::vector<int> removable_sets;
-    for (int set : state_->active_sets) {
-      if (CanRemove(set)) {
-        removable_sets.push_back(set);
+    if (!removal_cache_valid_) {
+      removable_sets_.clear();
+      for (int set : state_->active_sets) {
+        if (CanRemove(set)) {
+          removable_sets_.push_back(set);
+        }
       }
+      removal_weights_.clear();
+      for (int set : removable_sets_) {
+        long double utility = 0;
+        for (int element : sets_[set]) {
+          utility += 1.0L / state_->active_cover_count[element];
+        }
+        removal_weights_.push_back(set_costs_[set] / utility);
+      }
+      removal_sampler_.Reset(removal_weights_);
+      removal_cache_valid_ = true;
     }
-    if (removable_sets.empty()) {
+    if (removable_sets_.empty()) {
       pending_ = std::make_unique<SetRemovalCandidate>(
-          *state_, std::vector<std::pair<int, int>>{});
+          *state_, std::vector<std::pair<int, int>>{}, removal_cache_valid_);
       return pending_.get();
     }
-
-    int removed_set = Pick(removable_sets);
+    long double removal_total = removal_sampler_.Total();
+    std::uniform_real_distribution<long double> removal_distribution(
+        0, removal_total);
+    long double removal_value = removal_distribution(random_);
+    if (removal_value >= removal_total) {
+      removal_value = std::nextafter(removal_total, 0.0L);
+    }
+    int removed_set = removable_sets_[
+        removal_sampler_.IndexForCumulativeWeight(removal_value)];
     std::vector<std::pair<int, int>> changes;
     std::vector<int> removed_elements = state_->assigned_elements[removed_set];
     for (int element : removed_elements) {
@@ -360,8 +412,8 @@ private:
       changes.emplace_back(element, removed_set);
       state_->Reassign(element, replacement);
     }
-    pending_ =
-        std::make_unique<SetRemovalCandidate>(*state_, std::move(changes));
+    pending_ = std::make_unique<SetRemovalCandidate>(
+        *state_, std::move(changes), removal_cache_valid_);
     return pending_.get();
   }
 
@@ -386,13 +438,18 @@ private:
   }
 
   int PickActiveCoveringSet(int element, int excluded_set) {
-    std::vector<int> choices;
+    int choice = -1;
+    int choice_count = 0;
     for (int set : sets_for_element_[element]) {
       if (set != excluded_set && state_->IsActive(set)) {
-        choices.push_back(set);
+        ++choice_count;
+        if (std::uniform_int_distribution<int>(0, choice_count - 1)(random_) ==
+            0) {
+          choice = set;
+        }
       }
     }
-    return choices.empty() ? -1 : Pick(choices);
+    return choice;
   }
 
   int PickDifferentCoveringSet(int element, int excluded_set) {
@@ -421,6 +478,10 @@ private:
   std::vector<long double> original_set_costs_;
   std::vector<long double> set_utilities_;
   std::vector<FenwickTree> replacement_samplers_;
+  std::vector<int> removable_sets_;
+  std::vector<long double> removal_weights_;
+  FenwickTree removal_sampler_;
+  bool removal_cache_valid_ = false;
   std::vector<int> original_set_indices_;
   std::unique_ptr<SetCover> state_;
   std::unique_ptr<SetRemovalCandidate> pending_;
@@ -428,10 +489,30 @@ private:
 };
 
 int main(int argc, char *argv[]) {
-  if (argc != 2 && argc != 3) {
-    std::cerr << "usage: setcover <instance-file> [solution-file]\n";
+  if (argc < 2) {
+    std::cerr << "usage: setcover <instance-file> [solution-file] [--seed N]\n";
     return 1;
   }
+
+  int argument = 2;
+  std::string solution_path;
+  if (argument < argc && std::string_view(argv[argument]) != "--seed") {
+    solution_path = argv[argument++];
+  }
+  std::uint32_t seed = 5489u;
+  if (argument < argc) {
+    if (argument + 2 != argc || std::string_view(argv[argument]) != "--seed") {
+      std::cerr << "usage: setcover <instance-file> [solution-file] [--seed N]\n";
+      return 1;
+    }
+    try {
+      seed = static_cast<std::uint32_t>(std::stoul(argv[argument + 1]));
+    } catch (const std::exception &) {
+      std::cerr << "invalid seed\n";
+      return 1;
+    }
+  }
+  std::cerr << "seed=" << seed << '\n';
 
   std::ifstream input(argv[1]);
   if (!input) {
@@ -441,8 +522,8 @@ int main(int argc, char *argv[]) {
 
   std::ofstream output_file;
   std::ostream *output = &std::cout;
-  if (argc == 3) {
-    output_file.open(argv[2]);
+  if (!solution_path.empty()) {
+    output_file.open(solution_path);
     if (!output_file) {
       std::cerr << "cannot write solution file: " << argv[2] << '\n';
       return 1;
@@ -451,12 +532,12 @@ int main(int argc, char *argv[]) {
   }
 
   try {
-    auto space = std::make_unique<SetCoverSpace>(ParseInstance(input));
+    auto space = std::make_unique<SetCoverSpace>(ParseInstance(input), seed);
     SetCoverSpace *space_view = space.get();
     Annealer annealer(std::move(space),
                       std::make_unique<ExpDecayScheduler>(1.0L, 0.9999995L,
                                                           0.0001L),
-                      std::make_unique<MetropolisAcceptPolicy>());
+                      std::make_unique<MetropolisAcceptPolicy>(seed));
     auto solution = annealer.Run();
     const auto &stats = annealer.Stats();
     std::cerr << "anneal stats: iterations=" << stats.iterations
