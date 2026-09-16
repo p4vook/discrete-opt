@@ -149,7 +149,7 @@ class RemoveCandidate : public Candidate {
 public:
   RemoveCandidate(KnapsackSpace &space, std::size_t object_index);
 
-  void Accept() override {}
+  void Accept() override;
 
   void Reject() override;
 
@@ -228,22 +228,6 @@ private:
   friend class AddCandidate;
   friend class RemoveCandidate;
 
-  long double AddWeight(std::size_t object_index) const {
-    const Object &object = instance_.objects[object_index];
-    if (object.weight == 0) {
-      return 0;
-    }
-    return object.normalized_cost / object.weight;
-  }
-
-  long double RemoveWeight(std::size_t object_index) const {
-    const Object &object = instance_.objects[object_index];
-    if (object.normalized_cost == 0) {
-      return 0;
-    }
-    return object.weight / object.normalized_cost;
-  }
-
   void GreedyInitialize() {
     std::vector<std::size_t> object_indices(instance_.objects.size());
     std::iota(object_indices.begin(), object_indices.end(), 0);
@@ -296,20 +280,14 @@ private:
     for (std::size_t object_index = 0; object_index < instance_.objects.size();
          ++object_index) {
       if (state_->taken[object_index]) {
-        const long double weight = RemoveWeight(object_index);
-        if (weight > 0) {
-          remove_weights[object_index] = weight;
-          remove_active_[object_index] = true;
-          ++remove_candidate_count_;
-        }
+        remove_weights[object_index] = 1;
+        remove_active_[object_index] = true;
+        ++remove_candidate_count_;
       } else if (instance_.objects[object_index].weight <=
                  remaining_capacity_) {
-        const long double weight = AddWeight(object_index);
-        if (weight > 0) {
-          add_weights[object_index] = weight;
-          add_active_[object_index] = true;
-          ++add_candidate_count_;
-        }
+        add_weights[object_index] = 1;
+        add_active_[object_index] = true;
+        ++add_candidate_count_;
       }
     }
     add_sampler_.Reset(add_weights);
@@ -318,13 +296,13 @@ private:
 
   void SetAddActive(std::size_t object_index, bool active) {
     active = active && !state_->taken[object_index] &&
-             ban_until_[object_index] == 0 && AddWeight(object_index) > 0 &&
+             ban_until_[object_index] == 0 &&
              instance_.objects[object_index].weight <= remaining_capacity_;
     if (add_active_[object_index] == active) {
       return;
     }
     add_active_[object_index] = active;
-    add_sampler_.Set(object_index, active ? AddWeight(object_index) : 0);
+    add_sampler_.Set(object_index, active ? 1 : 0);
     if (active) {
       ++add_candidate_count_;
     } else {
@@ -333,13 +311,12 @@ private:
   }
 
   void SetRemoveActive(std::size_t object_index, bool active) {
-    active =
-        active && state_->taken[object_index] && RemoveWeight(object_index) > 0;
+    active = active && state_->taken[object_index];
     if (remove_active_[object_index] == active) {
       return;
     }
     remove_active_[object_index] = active;
-    remove_sampler_.Set(object_index, active ? RemoveWeight(object_index) : 0);
+    remove_sampler_.Set(object_index, active ? 1 : 0);
     if (active) {
       ++remove_candidate_count_;
     } else {
@@ -459,10 +436,12 @@ void AddCandidate::Reject() { space_.Remove(object_index_, false); }
 
 RemoveCandidate::RemoveCandidate(KnapsackSpace &space, std::size_t object_index)
     : space_(space), object_index_(object_index) {
-  space_.Remove(object_index_, true);
+  space_.Remove(object_index_, false);
 }
 
-void RemoveCandidate::Reject() { space_.Add(object_index_, true); }
+void RemoveCandidate::Accept() { space_.Ban(object_index_); }
+
+void RemoveCandidate::Reject() { space_.Add(object_index_); }
 
 int main(int argc, char *argv[]) {
   if (argc < 2) {
