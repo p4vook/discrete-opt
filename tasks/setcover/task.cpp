@@ -1,4 +1,5 @@
 #include "optlib/anneal.h"
+#include "optlib/random.h"
 #include "optlib/sched.h"
 
 #include <algorithm>
@@ -319,8 +320,7 @@ public:
 
 private:
   int Pick(const std::vector<int> &choices) {
-    std::uniform_int_distribution<size_t> distribution(0, choices.size() - 1);
-    return choices[distribution(random_)];
+    return RandomChoice(choices, random_);
   }
 
   bool CanRemove(int set) const {
@@ -365,7 +365,7 @@ private:
   std::vector<int> original_set_indices_;
   std::unique_ptr<SetCover> state_;
   std::unique_ptr<SetRemovalCandidate> pending_;
-  std::mt19937 random_{std::random_device{}()};
+  std::mt19937 random_;
 };
 
 int main(int argc, char *argv[]) {
