@@ -147,6 +147,15 @@ tasks/setcover/data/*
 !tasks/setcover/data/sc_10000_5
 !tasks/setcover/data/sc_10000_2
 
+# Keep only the configured knapsack evaluation inputs in version control.
+tasks/knapsack/data/*
+!tasks/knapsack/data/ks_30_0
+!tasks/knapsack/data/ks_50_0
+!tasks/knapsack/data/ks_200_0
+!tasks/knapsack/data/ks_400_0
+!tasks/knapsack/data/ks_1000_0
+!tasks/knapsack/data/ks_10000_0
+
 .venv
 env/
 venv/
