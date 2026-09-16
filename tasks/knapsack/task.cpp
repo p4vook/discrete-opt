@@ -4,10 +4,13 @@
 #include "optlib/random.h"
 #include "optlib/sched.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <memory>
+#include <numeric>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -182,7 +185,9 @@ class KnapsackSpace : public StateSpace {
 public:
   explicit KnapsackSpace(KnapsackInstance instance, std::uint32_t seed = 5489u)
       : instance_(std::move(instance)),
-        state_(std::make_unique<KnapsackState>(instance_)), random_(seed) {}
+        state_(std::make_unique<KnapsackState>(instance_)), random_(seed) {
+    GreedyInitialize();
+  }
 
   State *Current() const override { return state_.get(); }
 
@@ -237,6 +242,32 @@ public:
   }
 
 private:
+  void GreedyInitialize() {
+    std::vector<std::size_t> object_indices(instance_.objects.size());
+    std::iota(object_indices.begin(), object_indices.end(), 0);
+    const auto utility = [this](std::size_t object_index) {
+      const Object &object = instance_.objects[object_index];
+      if (object.weight == 0) {
+        return object.cost > 0 ? std::numeric_limits<long double>::infinity()
+                               : 0.0L;
+      }
+      return static_cast<long double>(object.cost) / object.weight;
+    };
+    std::stable_sort(object_indices.begin(), object_indices.end(),
+                     [&utility](std::size_t left, std::size_t right) {
+                       return utility(left) > utility(right);
+                     });
+
+    std::int64_t remaining_capacity = instance_.capacity;
+    for (std::size_t object_index : object_indices) {
+      const std::int64_t weight = instance_.objects[object_index].weight;
+      if (weight <= remaining_capacity) {
+        state_->taken[object_index] = 1;
+        remaining_capacity -= weight;
+      }
+    }
+  }
+
   KnapsackInstance instance_;
   std::unique_ptr<KnapsackState> state_;
   std::unique_ptr<Candidate> pending_;
@@ -293,7 +324,7 @@ int main(int argc, char *argv[]) {
     KnapsackSpace *space_view = space.get();
     Annealer annealer(
         std::move(space),
-        std::make_unique<ExpDecayScheduler>(1.0L, 0.999999L, 0.0001L),
+        std::make_unique<ExpDecayScheduler>(1.0L, 0.99999L, 0.0001L),
         std::make_unique<MetropolisAcceptPolicy>(seed));
     std::unique_ptr<State> solution = annealer.Run();
     const AnnealStats &stats = annealer.Stats();
