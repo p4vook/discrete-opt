@@ -7,6 +7,7 @@ task=setcover
 config_file=""
 binary_override=""
 output_override=""
+seed_override=""
 jobs=4
 
 load_config() {
@@ -62,7 +63,12 @@ run_one() {
   local time_file="$output_dir/$name.time"
   local row_file="$output_dir/$name.tsv"
 
-  /usr/bin/time -p -o "$time_file" "$binary" "$instance" "$solution_file"
+  if [[ -n $seed_override ]]; then
+    /usr/bin/time -p -o "$time_file" \
+      "$binary" "$instance" "$solution_file" --seed "$seed_override"
+  else
+    /usr/bin/time -p -o "$time_file" "$binary" "$instance" "$solution_file"
+  fi
 
   local score
   score=$(awk '$1 == "score" { print $2; exit }' "$solution_file")
@@ -81,8 +87,9 @@ if [[ ${1:-} == "--run-one" ]]; then
   binary=$2
   output_dir=$3
   config_file=$4
+  seed_override=$5
   load_config
-  run_one "$5"
+  run_one "$6"
   exit 0
 fi
 
@@ -94,8 +101,9 @@ while (($#)); do
     --jobs) jobs=$2; shift 2 ;;
     --binary) binary_override=$2; shift 2 ;;
     --output-dir) output_override=$2; shift 2 ;;
+    --seed) seed_override=$2; shift 2 ;;
     --help)
-      printf 'usage: %s [--task NAME] [--config PATH] [--jobs N] [--binary PATH] [--output-dir PATH] [INSTANCE ...]\n' "$0"
+      printf 'usage: %s [--task NAME] [--config PATH] [--jobs N] [--binary PATH] [--output-dir PATH] [--seed N] [INSTANCE ...]\n' "$0"
       exit 0
       ;;
     *) instances+=("$1"); shift ;;
@@ -120,7 +128,7 @@ fi
 mkdir -p "$output_dir"
 
 printf '%s\0' "${instances[@]}" |
-  xargs -0 -n 1 -P "$jobs" "$0" --run-one "$binary" "$output_dir" "$config_file"
+  xargs -0 -n 1 -P "$jobs" "$0" --run-one "$binary" "$output_dir" "$config_file" "$seed_override"
 
 table="$output_dir/scores.tsv"
 printf 'instance\tscore\tcpu_seconds\tpoints\n' > "$table"
