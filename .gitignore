@@ -156,6 +156,15 @@ tasks/knapsack/data/*
 !tasks/knapsack/data/ks_1000_0
 !tasks/knapsack/data/ks_10000_0
 
+# Keep only the configured graph-coloring evaluation inputs in version control.
+tasks/coloring/data/*
+!tasks/coloring/data/gc_50_3
+!tasks/coloring/data/gc_70_7
+!tasks/coloring/data/gc_100_5
+!tasks/coloring/data/gc_250_9
+!tasks/coloring/data/gc_500_1
+!tasks/coloring/data/gc_1000_5
+
 .venv
 env/
 venv/
