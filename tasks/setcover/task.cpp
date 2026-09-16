@@ -73,13 +73,21 @@ struct SetCover : State {
   std::vector<int> active_positions;
   std::vector<int64_t> set_costs;
   int64_t total_cost = 0;
+  std::vector<std::vector<int>> assigned_elements;
+  std::vector<int> assignment_positions;
 
   SetCover(std::vector<int> covered_by_, std::vector<int64_t> set_costs_)
       : covered_by(std::move(covered_by_)), set_usage(set_costs_.size()),
         active_positions(set_costs_.size(), -1),
-        set_costs(std::move(set_costs_)) {
-    for (int set : covered_by) {
+        set_costs(std::move(set_costs_)),
+        assigned_elements(set_usage.size()),
+        assignment_positions(covered_by.size()) {
+    for (int element = 0; element < static_cast<int>(covered_by.size());
+         ++element) {
+      int set = covered_by[element];
       ++set_usage[set];
+      assignment_positions[element] = assigned_elements[set].size();
+      assigned_elements[set].push_back(element);
     }
     for (int set = 0; set < static_cast<int>(set_usage.size()); ++set) {
       if (set_usage[set] > 0) {
@@ -102,6 +110,12 @@ struct SetCover : State {
       return;
     }
 
+    int old_position = assignment_positions[element];
+    int last_element = assigned_elements[old_set].back();
+    assigned_elements[old_set][old_position] = last_element;
+    assignment_positions[last_element] = old_position;
+    assigned_elements[old_set].pop_back();
+
     if (--set_usage[old_set] == 0) {
       Deactivate(old_set);
     }
@@ -109,6 +123,8 @@ struct SetCover : State {
       Activate(new_set);
     }
     covered_by[element] = new_set;
+    assignment_positions[element] = assigned_elements[new_set].size();
+    assigned_elements[new_set].push_back(element);
   }
 
 private:
@@ -207,7 +223,9 @@ public:
     if (solution.covered_by.size() != sets_for_element_.size() ||
         solution.set_usage.size() != sets_.size() ||
         solution.active_positions.size() != sets_.size() ||
-        solution.set_costs != set_costs_) {
+        solution.set_costs != set_costs_ ||
+        solution.assigned_elements.size() != sets_.size() ||
+        solution.assignment_positions.size() != sets_for_element_.size()) {
       return false;
     }
 
@@ -225,6 +243,23 @@ public:
     }
     if (usage != solution.set_usage) {
       return false;
+    }
+    for (int set = 0; set < static_cast<int>(sets_.size()); ++set) {
+      if (solution.assigned_elements[set].size() !=
+          static_cast<size_t>(usage[set])) {
+        return false;
+      }
+      for (int position = 0;
+           position < static_cast<int>(solution.assigned_elements[set].size());
+           ++position) {
+        int element = solution.assigned_elements[set][position];
+        if (element < 0 ||
+            element >= static_cast<int>(solution.covered_by.size()) ||
+            solution.covered_by[element] != set ||
+            solution.assignment_positions[element] != position) {
+          return false;
+        }
+      }
     }
 
     std::vector<bool> is_active(sets_.size());
@@ -268,12 +303,8 @@ public:
 
     int removed_set = Pick(removable_sets);
     std::vector<std::pair<int, int>> changes;
-    for (int element = 0; element < static_cast<int>(state_->covered_by.size());
-         ++element) {
-      if (state_->covered_by[element] != removed_set) {
-        continue;
-      }
-
+    std::vector<int> removed_elements = state_->assigned_elements[removed_set];
+    for (int element : removed_elements) {
       int replacement = PickActiveCoveringSet(element, removed_set);
       if (replacement == -1) {
         replacement = PickDifferentCoveringSet(element, removed_set);
@@ -293,11 +324,7 @@ private:
   }
 
   bool CanRemove(int set) const {
-    for (int element = 0; element < static_cast<int>(state_->covered_by.size());
-         ++element) {
-      if (state_->covered_by[element] != set) {
-        continue;
-      }
+    for (int element : state_->assigned_elements[set]) {
       bool has_replacement = false;
       for (int covering_set : sets_for_element_[element]) {
         if (covering_set != set) {
