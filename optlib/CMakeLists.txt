@@ -1,5 +1,6 @@
 add_library(optlib SHARED
   anneal.cpp
+  accept.cpp
   sched.cpp
 )
 

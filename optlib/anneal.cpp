@@ -1,8 +1,10 @@
 #include "anneal.h"
 
 Annealer::Annealer(std::unique_ptr<StateSpace> space,
-                   std::unique_ptr<Scheduler> sched)
+                   std::unique_ptr<Scheduler> sched,
+                   std::unique_ptr<AcceptPolicy> policy)
     : space_(std::move(space)), sched_(std::move(sched)),
+      policy_(std::move(policy)),
       optimum_(space_->Current()->Snapshot()) {}
 
 std::unique_ptr<State> Annealer::Run() {
@@ -13,7 +15,8 @@ std::unique_ptr<State> Annealer::Run() {
     ++stats_.iterations;
     auto previous_score = space_->Current()->Evaluate();
     auto candidate = space_->Next();
-    if (sched_->ShouldShift(previous_score, space_->Current()->Evaluate())) {
+    if (policy_->ShouldShift(previous_score, space_->Current()->Evaluate(),
+                             sched_->Temperature())) {
       ++stats_.accepted;
       candidate->Accept();
       if (space_->Current()->Evaluate() < optimum_->Evaluate()) {

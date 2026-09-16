@@ -3,13 +3,20 @@
 #include <memory>
 
 struct Scheduler {
-  virtual bool ShouldShift(double from_score, double to_score) = 0;
+  virtual long double Temperature() const = 0;
 
   virtual void CoolDown() = 0;
 
   virtual bool IsFrozen() = 0;
 
   virtual ~Scheduler() = default;
+};
+
+struct AcceptPolicy {
+  virtual bool ShouldShift(double from_score, double to_score,
+                           long double temperature) = 0;
+
+  virtual ~AcceptPolicy() = default;
 };
 
 struct State {

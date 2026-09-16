@@ -16,7 +16,8 @@ struct AnnealStats {
 
 class Annealer {
 public:
-  Annealer(std::unique_ptr<StateSpace> space, std::unique_ptr<Scheduler> sched);
+  Annealer(std::unique_ptr<StateSpace> space, std::unique_ptr<Scheduler> sched,
+           std::unique_ptr<AcceptPolicy> policy);
 
   std::unique_ptr<State> Run();
 
@@ -25,6 +26,7 @@ public:
 private:
   std::unique_ptr<StateSpace> space_;
   std::unique_ptr<Scheduler> sched_;
+  std::unique_ptr<AcceptPolicy> policy_;
   std::unique_ptr<State> optimum_;
   AnnealStats stats_;
 };
