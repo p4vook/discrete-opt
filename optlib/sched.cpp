@@ -10,8 +10,9 @@ bool ExpDecayScheduler::ShouldShift(double from_score, double to_score) {
     if (to_score < from_score) {
         return true;
     }
-    long double shift_probability =
-        std::exp(-(static_cast<long double>(from_score) / to_score) / temp_);
+    long double delta =
+        static_cast<long double>(to_score) - static_cast<long double>(from_score);
+    long double shift_probability = std::exp(-delta / temp_);
     return distr_(rnd_) < shift_probability;
 }
 
