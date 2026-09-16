@@ -6,7 +6,8 @@
 
 class ExpDecayScheduler : public Scheduler {
 public:
-  ExpDecayScheduler(double start = 1, double step = 0.9999, double min = 0.0001);
+  ExpDecayScheduler(long double start = 1.0L, long double step = 0.999999L,
+                    long double min = 0.0001L);
 
   bool ShouldShift(double from_score, double to_score) override;
 
@@ -15,9 +16,9 @@ public:
   bool IsFrozen() override;
 
 private:
-  double temp_;
-  const double step_;
-  const double min_;
-  std::uniform_real_distribution<double> distr_{0, 1};
+  long double temp_;
+  const long double step_;
+  const long double min_;
+  std::uniform_real_distribution<long double> distr_{0.0L, 1.0L};
   std::mt19937 rnd_;
 };
