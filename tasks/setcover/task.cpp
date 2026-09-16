@@ -1,13 +1,16 @@
 #include "optlib/anneal.h"
+#include "optlib/accept.h"
 #include "optlib/random.h"
 #include "optlib/sched.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <fstream>
 #include <iostream>
 #include <numeric>
 #include <random>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -15,7 +18,8 @@
 
 struct SetCoverInstance {
   int element_count;
-  std::vector<int64_t> costs;
+  std::vector<long double> original_costs;
+  std::vector<long double> costs;
   std::vector<std::vector<int>> sets;
 };
 
@@ -41,7 +45,7 @@ SetCoverInstance ParseInstance(std::istream &input) {
     }
 
     std::istringstream description(line);
-    int64_t cost;
+    long double cost;
     if (!(description >> cost)) {
       throw std::runtime_error("missing cost for set " +
                                std::to_string(set_index));
@@ -64,6 +68,19 @@ SetCoverInstance ParseInstance(std::istream &input) {
     instance.sets.push_back(std::move(elements));
   }
 
+  long double total_cost = 0;
+  for (long double cost : instance.costs) {
+    total_cost += cost;
+  }
+  if (total_cost <= 0) {
+    throw std::runtime_error("set costs must have a positive total");
+  }
+  instance.original_costs = instance.costs;
+  long double scale = static_cast<long double>(set_count) / total_cost;
+  for (long double &cost : instance.costs) {
+    cost *= scale;
+  }
+
   return instance;
 }
 
@@ -72,12 +89,12 @@ struct SetCover : State {
   std::vector<int> set_usage;
   std::vector<int> active_sets;
   std::vector<int> active_positions;
-  std::vector<int64_t> set_costs;
-  int64_t total_cost = 0;
+  std::vector<long double> set_costs;
+  long double total_cost = 0;
   std::vector<std::vector<int>> assigned_elements;
   std::vector<int> assignment_positions;
 
-  SetCover(std::vector<int> covered_by_, std::vector<int64_t> set_costs_)
+  SetCover(std::vector<int> covered_by_, std::vector<long double> set_costs_)
       : covered_by(std::move(covered_by_)), set_usage(set_costs_.size()),
         active_positions(set_costs_.size(), -1),
         set_costs(std::move(set_costs_)),
@@ -175,10 +192,12 @@ public:
 
     sets_.reserve(order.size());
     set_costs_.reserve(order.size());
+    original_set_costs_.reserve(order.size());
     original_set_indices_.reserve(order.size());
     for (int set : order) {
       sets_.push_back(std::move(instance.sets[set]));
       set_costs_.push_back(instance.costs[set]);
+      original_set_costs_.push_back(instance.original_costs[set]);
       original_set_indices_.push_back(set);
     }
 
@@ -206,12 +225,14 @@ public:
   void WriteSolution(std::ostream &output, const SetCover &solution) const {
     std::vector<int> selected_sets;
     selected_sets.reserve(solution.active_sets.size());
+    long double original_score = 0;
     for (int internal_set : solution.active_sets) {
       selected_sets.push_back(original_set_indices_[internal_set]);
+      original_score += original_set_costs_[internal_set];
     }
     std::sort(selected_sets.begin(), selected_sets.end());
 
-    output << "score " << solution.Evaluate() << '\n';
+    output << "score " << original_score << '\n';
     output << "set_count " << selected_sets.size() << '\n';
     output << "sets";
     for (int set : selected_sets) {
@@ -280,13 +301,17 @@ public:
         return false;
       }
     }
-    int64_t total_cost = 0;
+    long double total_cost = 0;
     for (int set = 0; set < static_cast<int>(sets_.size()); ++set) {
       if (usage[set] > 0) {
         total_cost += set_costs_[set];
       }
     }
-    return solution.total_cost == total_cost && solution.Evaluate() == total_cost;
+    long double tolerance =
+        1e-8L *
+        std::max(1.0L,
+                 std::max(std::abs(solution.total_cost), std::abs(total_cost)));
+    return std::abs(solution.total_cost - total_cost) <= tolerance;
   }
 
   Candidate *Next() override {
@@ -361,7 +386,8 @@ private:
 
   std::vector<std::vector<int>> sets_;
   std::vector<std::vector<int>> sets_for_element_;
-  std::vector<int64_t> set_costs_;
+  std::vector<long double> set_costs_;
+  std::vector<long double> original_set_costs_;
   std::vector<int> original_set_indices_;
   std::unique_ptr<SetCover> state_;
   std::unique_ptr<SetRemovalCandidate> pending_;
@@ -394,15 +420,18 @@ int main(int argc, char *argv[]) {
   try {
     auto space = std::make_unique<SetCoverSpace>(ParseInstance(input));
     SetCoverSpace *space_view = space.get();
-    Annealer annealer(std::move(space), std::make_unique<ExpDecayScheduler>());
+    Annealer annealer(std::move(space), std::make_unique<ExpDecayScheduler>(),
+                      std::make_unique<MetropolisAcceptPolicy>());
     auto solution = annealer.Run();
     const auto *set_cover_solution = dynamic_cast<const SetCover *>(solution.get());
     if (set_cover_solution == nullptr || !space_view->IsValid(*set_cover_solution)) {
       throw std::runtime_error("annealer produced an invalid solution");
     }
+    output->precision(17);
     space_view->WriteSolution(*output, *set_cover_solution);
   } catch (const std::exception &error) {
     std::cerr << "invalid set-cover instance: " << error.what() << '\n';
     return 1;
   }
 }
+#include <iomanip>
