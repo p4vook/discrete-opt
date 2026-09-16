@@ -1,6 +1,7 @@
 #include "optlib/anneal.h"
 #include "optlib/sched.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <fstream>
 #include <iostream>
@@ -70,21 +71,24 @@ struct SetCover : State {
   std::vector<int> set_usage;
   std::vector<int> active_sets;
   std::vector<int> active_positions;
+  std::vector<int64_t> set_costs;
+  int64_t total_cost = 0;
 
-  SetCover(std::vector<int> covered_by_, int set_count)
-      : covered_by(std::move(covered_by_)), set_usage(set_count),
-        active_positions(set_count, -1) {
+  SetCover(std::vector<int> covered_by_, std::vector<int64_t> set_costs_)
+      : covered_by(std::move(covered_by_)), set_usage(set_costs_.size()),
+        active_positions(set_costs_.size(), -1),
+        set_costs(std::move(set_costs_)) {
     for (int set : covered_by) {
       ++set_usage[set];
     }
-    for (int set = 0; set < set_count; ++set) {
+    for (int set = 0; set < static_cast<int>(set_usage.size()); ++set) {
       if (set_usage[set] > 0) {
         Activate(set);
       }
     }
   }
 
-  double Evaluate() const override { return active_sets.size(); }
+  double Evaluate() const override { return total_cost; }
 
   std::unique_ptr<State> Snapshot() const override {
     return std::make_unique<SetCover>(*this);
@@ -111,6 +115,7 @@ private:
   void Activate(int set) {
     active_positions[set] = active_sets.size();
     active_sets.push_back(set);
+    total_cost += set_costs[set];
   }
 
   void Deactivate(int set) {
@@ -120,6 +125,7 @@ private:
     active_positions[last_set] = position;
     active_sets.pop_back();
     active_positions[set] = -1;
+    total_cost -= set_costs[set];
   }
 };
 
@@ -151,8 +157,12 @@ public:
     std::shuffle(order.begin(), order.end(), random_);
 
     sets_.reserve(order.size());
+    set_costs_.reserve(order.size());
+    original_set_indices_.reserve(order.size());
     for (int set : order) {
       sets_.push_back(std::move(instance.sets[set]));
+      set_costs_.push_back(instance.costs[set]);
+      original_set_indices_.push_back(set);
     }
 
     sets_for_element_.resize(instance.element_count);
@@ -171,10 +181,77 @@ public:
                                  " is not covered by any set");
       }
     }
-    state_ = std::make_unique<SetCover>(std::move(covered_by), sets_.size());
+    state_ = std::make_unique<SetCover>(std::move(covered_by), set_costs_);
   }
 
   State *Current() const override { return state_.get(); }
+
+  void WriteSolution(std::ostream &output, const SetCover &solution) const {
+    std::vector<int> selected_sets;
+    selected_sets.reserve(solution.active_sets.size());
+    for (int internal_set : solution.active_sets) {
+      selected_sets.push_back(original_set_indices_[internal_set]);
+    }
+    std::sort(selected_sets.begin(), selected_sets.end());
+
+    output << "score " << solution.Evaluate() << '\n';
+    output << "set_count " << selected_sets.size() << '\n';
+    output << "sets";
+    for (int set : selected_sets) {
+      output << ' ' << set;
+    }
+    output << '\n';
+  }
+
+  bool IsValid(const SetCover &solution) const {
+    if (solution.covered_by.size() != sets_for_element_.size() ||
+        solution.set_usage.size() != sets_.size() ||
+        solution.active_positions.size() != sets_.size() ||
+        solution.set_costs != set_costs_) {
+      return false;
+    }
+
+    std::vector<int> usage(sets_.size());
+    for (int element = 0; element < static_cast<int>(solution.covered_by.size());
+         ++element) {
+      int set = solution.covered_by[element];
+      if (set < 0 || set >= static_cast<int>(sets_.size()) ||
+          std::find(sets_for_element_[element].begin(),
+                    sets_for_element_[element].end(),
+                    set) == sets_for_element_[element].end()) {
+        return false;
+      }
+      ++usage[set];
+    }
+    if (usage != solution.set_usage) {
+      return false;
+    }
+
+    std::vector<bool> is_active(sets_.size());
+    for (int position = 0;
+         position < static_cast<int>(solution.active_sets.size()); ++position) {
+      int set = solution.active_sets[position];
+      if (set < 0 || set >= static_cast<int>(sets_.size()) || is_active[set] ||
+          solution.active_positions[set] != position || usage[set] == 0) {
+        return false;
+      }
+      is_active[set] = true;
+    }
+    for (int set = 0; set < static_cast<int>(sets_.size()); ++set) {
+      if (is_active[set] != (usage[set] > 0) ||
+          (is_active[set] && solution.active_positions[set] < 0) ||
+          (!is_active[set] && solution.active_positions[set] != -1)) {
+        return false;
+      }
+    }
+    int64_t total_cost = 0;
+    for (int set = 0; set < static_cast<int>(sets_.size()); ++set) {
+      if (usage[set] > 0) {
+        total_cost += set_costs_[set];
+      }
+    }
+    return solution.total_cost == total_cost && solution.Evaluate() == total_cost;
+  }
 
   Candidate *Next() override {
     std::vector<int> removable_sets;
@@ -257,14 +334,16 @@ private:
 
   std::vector<std::vector<int>> sets_;
   std::vector<std::vector<int>> sets_for_element_;
+  std::vector<int64_t> set_costs_;
+  std::vector<int> original_set_indices_;
   std::unique_ptr<SetCover> state_;
   std::unique_ptr<SetRemovalCandidate> pending_;
   std::mt19937 random_{std::random_device{}()};
 };
 
 int main(int argc, char *argv[]) {
-  if (argc != 2) {
-    std::cerr << "usage: setcover <instance-file>\n";
+  if (argc != 2 && argc != 3) {
+    std::cerr << "usage: setcover <instance-file> [solution-file]\n";
     return 1;
   }
 
@@ -274,11 +353,27 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
+  std::ofstream output_file;
+  std::ostream *output = &std::cout;
+  if (argc == 3) {
+    output_file.open(argv[2]);
+    if (!output_file) {
+      std::cerr << "cannot write solution file: " << argv[2] << '\n';
+      return 1;
+    }
+    output = &output_file;
+  }
+
   try {
     auto space = std::make_unique<SetCoverSpace>(ParseInstance(input));
+    SetCoverSpace *space_view = space.get();
     Annealer annealer(std::move(space), std::make_unique<ExpDecayScheduler>());
     auto solution = annealer.Run();
-    std::cout << solution->Evaluate() << '\n';
+    const auto *set_cover_solution = dynamic_cast<const SetCover *>(solution.get());
+    if (set_cover_solution == nullptr || !space_view->IsValid(*set_cover_solution)) {
+      throw std::runtime_error("annealer produced an invalid solution");
+    }
+    space_view->WriteSolution(*output, *set_cover_solution);
   } catch (const std::exception &error) {
     std::cerr << "invalid set-cover instance: " << error.what() << '\n';
     return 1;
