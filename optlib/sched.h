@@ -1,10 +1,10 @@
 #pragma once
 
-#include "public.h"
+#include "optlib/public.h"
 
 #include <random>
 
-class ExpDecayScheduler : Scheduler {
+class ExpDecayScheduler : public Scheduler {
 public:
   ExpDecayScheduler(double start = 1, double step = 0.9999, double min = 0.0001);
 

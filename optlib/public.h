@@ -13,7 +13,7 @@ struct Scheduler {
 };
 
 struct State {
-  // higher is better
+  // lower is better
   virtual double Evaluate() const = 0;
 
   virtual std::unique_ptr<State> Snapshot() const = 0;
@@ -21,10 +21,12 @@ struct State {
   virtual ~State() = default;
 };
 
-struct Candidate : State {
+struct Candidate {
   virtual void Accept() = 0;
 
   virtual void Reject() = 0;
+
+  virtual ~Candidate() = default;
 };
 
 struct StateSpace {

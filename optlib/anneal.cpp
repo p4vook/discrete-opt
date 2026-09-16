@@ -6,10 +6,10 @@ Annealer::Annealer(std::unique_ptr<StateSpace> space,
       optimum_(space_->Current()->Snapshot()) {}
 
 std::unique_ptr<State> Annealer::Run() {
-  for (; !sched_->Cold(); sched_->Cool()) {
+  for (; !sched_->IsFrozen(); sched_->CoolDown()) {
+    auto previous_score = space_->Current()->Evaluate();
     auto candidate = space_->Next();
-    if (sched_->ShouldShift(candidate->Evaluate() -
-                            space_->Current()->Evaluate())) {
+    if (sched_->ShouldShift(previous_score, space_->Current()->Evaluate())) {
       candidate->Accept();
       if (space_->Current()->Evaluate() < optimum_->Evaluate()) {
         optimum_ = space_->Current()->Snapshot();

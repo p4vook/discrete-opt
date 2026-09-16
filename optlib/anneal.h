@@ -1,6 +1,6 @@
 #pragma once
 
-#include "public.h"
+#include "optlib/public.h"
 
 class Annealer {
 public:
