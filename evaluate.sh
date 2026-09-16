@@ -19,6 +19,13 @@ load_config() {
   fi
   source "$config_file"
   task_dir=$(cd "$(dirname "$config_file")" && pwd)
+  case ${eval_score_direction:-} in
+    minimize|maximize) ;;
+    *)
+      printf 'invalid or missing eval_score_direction in %s\n' "$config_file" >&2
+      exit 1
+      ;;
+  esac
 }
 
 points_for() {
@@ -30,9 +37,14 @@ points_for() {
       continue
     fi
     awk -v score="$score" -v three="${eval_three_thresholds[index]}" \
+        -v direction="$eval_score_direction" \
         -v five="${eval_five_thresholds[index]}" '
       BEGIN {
-        if (score <= five) print 5;
+        if (direction == "maximize") {
+          if (score >= five) print 5;
+          else if (score >= three) print 3;
+          else print 0;
+        } else if (score <= five) print 5;
         else if (score <= three) print 3;
         else print 0;
       }
@@ -54,6 +66,10 @@ run_one() {
 
   local score
   score=$(awk '$1 == "score" { print $2; exit }' "$solution_file")
+  if [[ -z $score ]]; then
+    printf 'solver did not write a score for %s\n' "$name" >&2
+    exit 1
+  fi
   local user_time
   user_time=$(awk '$1 == "user" { print $2; exit }' "$time_file")
   local points
@@ -113,11 +129,11 @@ for instance in "${instances[@]}"; do
 done
 
 total_points=$(awk -F '\t' 'NR > 1 { total += $4 } END { print total + 0 }' "$table")
-max_points=$(( ${#eval_instances[@]} * 5 ))
+max_points=$(( ${#instances[@]} * 5 ))
 {
   printf '#table(\n'
   printf '  columns: (1fr, auto, auto, auto),\n'
-  printf '  table.header([*Instance*], [*Cost score*], [*CPU time, s*], [*Points*]),\n'
+  printf '  table.header([*Instance*], [*Score*], [*CPU time, s*], [*Points*]),\n'
   while IFS=$'\t' read -r instance score cpu_seconds points; do
     [[ $instance == instance ]] && continue
     printf '  [`%s`], [%s], [%s], [%s],\n' \
