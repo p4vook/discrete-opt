@@ -1,11 +1,13 @@
 #include "optlib/accept.h"
 #include "optlib/anneal.h"
+#include "optlib/fenwick.h"
 #include "optlib/public.h"
-#include "optlib/random.h"
 #include "optlib/sched.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include <deque>
 #include <fstream>
 #include <iostream>
 #include <limits>
@@ -122,62 +124,37 @@ bool IsValid(const KnapsackInstance &instance, const KnapsackState &state) {
   return true;
 }
 
-std::int64_t RemainingCapacity(const KnapsackState &state) {
-  std::int64_t remaining_capacity = state.instance->capacity;
-  for (std::size_t object_index = 0; object_index < state.taken.size();
-       ++object_index) {
-    if (state.taken[object_index]) {
-      remaining_capacity -= state.instance->objects[object_index].weight;
-    }
-  }
-  return remaining_capacity;
-}
+class KnapsackSpace;
+
+class NoOpCandidate : public Candidate {
+public:
+  void Accept() override {}
+  void Reject() override {}
+};
 
 class AddCandidate : public Candidate {
 public:
-  AddCandidate(KnapsackState &state, std::size_t object_index)
-      : state_(state), object_index_(object_index) {
-    if (object_index >= state_.taken.size()) {
-      throw std::out_of_range("object index out of range");
-    }
-    if (state_.taken[object_index]) {
-      throw std::logic_error("cannot add an object already in the knapsack");
-    }
-    if (state_.instance->objects[object_index].weight >
-        RemainingCapacity(state_)) {
-      throw std::logic_error("cannot add an object beyond knapsack capacity");
-    }
-    state_.taken[object_index] = 1;
-  }
+  AddCandidate(KnapsackSpace &space, std::size_t object_index);
 
   void Accept() override {}
 
-  void Reject() override { state_.taken[object_index_] = 0; }
+  void Reject() override;
 
 private:
-  KnapsackState &state_;
+  KnapsackSpace &space_;
   std::size_t object_index_;
 };
 
 class RemoveCandidate : public Candidate {
 public:
-  RemoveCandidate(KnapsackState &state, std::size_t object_index)
-      : state_(state), object_index_(object_index) {
-    if (object_index >= state_.taken.size()) {
-      throw std::out_of_range("object index out of range");
-    }
-    if (!state_.taken[object_index]) {
-      throw std::logic_error("cannot remove an object outside the knapsack");
-    }
-    state_.taken[object_index] = 0;
-  }
+  RemoveCandidate(KnapsackSpace &space, std::size_t object_index);
 
   void Accept() override {}
 
-  void Reject() override { state_.taken[object_index_] = 1; }
+  void Reject() override;
 
 private:
-  KnapsackState &state_;
+  KnapsackSpace &space_;
   std::size_t object_index_;
 };
 
@@ -187,29 +164,35 @@ public:
       : instance_(std::move(instance)),
         state_(std::make_unique<KnapsackState>(instance_)), random_(seed) {
     GreedyInitialize();
+    InitializeSamplers();
   }
 
   State *Current() const override { return state_.get(); }
 
   Candidate *Next() override {
-    legal_objects_.clear();
-    const std::int64_t remaining_capacity = RemainingCapacity(*state_);
-    for (std::size_t object_index = 0; object_index < instance_.objects.size();
-         ++object_index) {
-      if (state_->taken[object_index] ||
-          instance_.objects[object_index].weight <= remaining_capacity) {
-        legal_objects_.push_back(object_index);
-      }
-    }
-    if (legal_objects_.empty()) {
-      throw std::logic_error("knapsack state has no legal candidates");
+    ++iteration_;
+    ExpireBans();
+    if (add_candidate_count_ == 0 && remove_candidate_count_ == 0) {
+      pending_ = std::make_unique<NoOpCandidate>();
+      return pending_.get();
     }
 
-    const std::size_t object_index = RandomChoice(legal_objects_, random_);
-    if (state_->taken[object_index]) {
-      pending_ = std::make_unique<RemoveCandidate>(*state_, object_index);
+    bool add;
+    if (remove_candidate_count_ == 0) {
+      add = true;
+    } else if (add_candidate_count_ == 0) {
+      add = false;
     } else {
-      pending_ = std::make_unique<AddCandidate>(*state_, object_index);
+      std::uniform_int_distribution<std::size_t> choose_move(
+          0, add_candidate_count_ + remove_candidate_count_ - 1);
+      add = choose_move(random_) < add_candidate_count_;
+    }
+
+    if (add) {
+      pending_ = std::make_unique<AddCandidate>(*this, Sample(add_sampler_));
+    } else {
+      pending_ =
+          std::make_unique<RemoveCandidate>(*this, Sample(remove_sampler_));
     }
     return pending_.get();
   }
@@ -242,6 +225,25 @@ public:
   }
 
 private:
+  friend class AddCandidate;
+  friend class RemoveCandidate;
+
+  long double AddWeight(std::size_t object_index) const {
+    const Object &object = instance_.objects[object_index];
+    if (object.weight == 0) {
+      return 0;
+    }
+    return object.normalized_cost / object.weight;
+  }
+
+  long double RemoveWeight(std::size_t object_index) const {
+    const Object &object = instance_.objects[object_index];
+    if (object.normalized_cost == 0) {
+      return 0;
+    }
+    return object.weight / object.normalized_cost;
+  }
+
   void GreedyInitialize() {
     std::vector<std::size_t> object_indices(instance_.objects.size());
     std::iota(object_indices.begin(), object_indices.end(), 0);
@@ -260,20 +262,207 @@ private:
 
     std::int64_t remaining_capacity = instance_.capacity;
     for (std::size_t object_index : object_indices) {
+      if (instance_.objects[object_index].cost == 0) {
+        continue;
+      }
       const std::int64_t weight = instance_.objects[object_index].weight;
       if (weight <= remaining_capacity) {
         state_->taken[object_index] = 1;
         remaining_capacity -= weight;
       }
     }
+    remaining_capacity_ = remaining_capacity;
+  }
+
+  void InitializeSamplers() {
+    weight_order_.resize(instance_.objects.size());
+    std::iota(weight_order_.begin(), weight_order_.end(), 0);
+    std::stable_sort(weight_order_.begin(), weight_order_.end(),
+                     [this](std::size_t left, std::size_t right) {
+                       return instance_.objects[left].weight <
+                              instance_.objects[right].weight;
+                     });
+    while (fitting_prefix_size_ < weight_order_.size() &&
+           instance_.objects[weight_order_[fitting_prefix_size_]].weight <=
+               remaining_capacity_) {
+      ++fitting_prefix_size_;
+    }
+
+    std::vector<long double> add_weights(instance_.objects.size());
+    std::vector<long double> remove_weights(instance_.objects.size());
+    add_active_.assign(instance_.objects.size(), false);
+    remove_active_.assign(instance_.objects.size(), false);
+    ban_until_.assign(instance_.objects.size(), 0);
+    for (std::size_t object_index = 0; object_index < instance_.objects.size();
+         ++object_index) {
+      if (state_->taken[object_index]) {
+        const long double weight = RemoveWeight(object_index);
+        if (weight > 0) {
+          remove_weights[object_index] = weight;
+          remove_active_[object_index] = true;
+          ++remove_candidate_count_;
+        }
+      } else if (instance_.objects[object_index].weight <=
+                 remaining_capacity_) {
+        const long double weight = AddWeight(object_index);
+        if (weight > 0) {
+          add_weights[object_index] = weight;
+          add_active_[object_index] = true;
+          ++add_candidate_count_;
+        }
+      }
+    }
+    add_sampler_.Reset(add_weights);
+    remove_sampler_.Reset(remove_weights);
+  }
+
+  void SetAddActive(std::size_t object_index, bool active) {
+    active = active && !state_->taken[object_index] &&
+             ban_until_[object_index] == 0 && AddWeight(object_index) > 0 &&
+             instance_.objects[object_index].weight <= remaining_capacity_;
+    if (add_active_[object_index] == active) {
+      return;
+    }
+    add_active_[object_index] = active;
+    add_sampler_.Set(object_index, active ? AddWeight(object_index) : 0);
+    if (active) {
+      ++add_candidate_count_;
+    } else {
+      --add_candidate_count_;
+    }
+  }
+
+  void SetRemoveActive(std::size_t object_index, bool active) {
+    active =
+        active && state_->taken[object_index] && RemoveWeight(object_index) > 0;
+    if (remove_active_[object_index] == active) {
+      return;
+    }
+    remove_active_[object_index] = active;
+    remove_sampler_.Set(object_index, active ? RemoveWeight(object_index) : 0);
+    if (active) {
+      ++remove_candidate_count_;
+    } else {
+      --remove_candidate_count_;
+    }
+  }
+
+  void UpdateFittingPrefix() {
+    while (fitting_prefix_size_ < weight_order_.size() &&
+           instance_.objects[weight_order_[fitting_prefix_size_]].weight <=
+               remaining_capacity_) {
+      const std::size_t object_index = weight_order_[fitting_prefix_size_++];
+      SetAddActive(object_index, true);
+    }
+    while (fitting_prefix_size_ > 0 &&
+           instance_.objects[weight_order_[fitting_prefix_size_ - 1]].weight >
+               remaining_capacity_) {
+      const std::size_t object_index = weight_order_[--fitting_prefix_size_];
+      SetAddActive(object_index, false);
+    }
+  }
+
+  void Add(std::size_t object_index, bool ignore_ban = false) {
+    if (object_index >= state_->taken.size()) {
+      throw std::out_of_range("object index out of range");
+    }
+    if (state_->taken[object_index]) {
+      throw std::logic_error("cannot add an object already in the knapsack");
+    }
+    if (!ignore_ban && ban_until_[object_index] != 0) {
+      throw std::logic_error("cannot add a banned object");
+    }
+    const std::int64_t weight = instance_.objects[object_index].weight;
+    if (weight > remaining_capacity_) {
+      throw std::logic_error("cannot add an object beyond knapsack capacity");
+    }
+
+    SetAddActive(object_index, false);
+    state_->taken[object_index] = 1;
+    SetRemoveActive(object_index, true);
+    remaining_capacity_ -= weight;
+    UpdateFittingPrefix();
+  }
+
+  void Remove(std::size_t object_index, bool record_ban) {
+    if (object_index >= state_->taken.size()) {
+      throw std::out_of_range("object index out of range");
+    }
+    if (!state_->taken[object_index]) {
+      throw std::logic_error("cannot remove an object outside the knapsack");
+    }
+
+    SetRemoveActive(object_index, false);
+    state_->taken[object_index] = 0;
+    remaining_capacity_ += instance_.objects[object_index].weight;
+    UpdateFittingPrefix();
+    SetAddActive(object_index, true);
+    if (record_ban) {
+      Ban(object_index);
+    }
+  }
+
+  void Ban(std::size_t object_index) {
+    constexpr std::size_t ban_duration = 10'000;
+    const std::size_t expiration = iteration_ + ban_duration + 1;
+    ban_until_[object_index] = expiration;
+    ban_expirations_.emplace_back(expiration, object_index);
+    SetAddActive(object_index, false);
+  }
+
+  void ExpireBans() {
+    while (!ban_expirations_.empty() &&
+           ban_expirations_.front().first <= iteration_) {
+      const auto [expiration, object_index] = ban_expirations_.front();
+      ban_expirations_.pop_front();
+      if (ban_until_[object_index] == expiration) {
+        ban_until_[object_index] = 0;
+        SetAddActive(object_index, true);
+      }
+    }
+  }
+
+  std::size_t Sample(FenwickTree &sampler) {
+    const long double total = sampler.Total();
+    std::uniform_real_distribution<long double> distribution(0, total);
+    long double value = distribution(random_);
+    if (value >= total) {
+      value = std::nextafter(total, 0.0L);
+    }
+    return sampler.IndexForCumulativeWeight(value);
   }
 
   KnapsackInstance instance_;
   std::unique_ptr<KnapsackState> state_;
   std::unique_ptr<Candidate> pending_;
-  std::vector<std::size_t> legal_objects_;
+  std::vector<std::size_t> weight_order_;
+  std::vector<char> add_active_;
+  std::vector<char> remove_active_;
+  FenwickTree add_sampler_;
+  FenwickTree remove_sampler_;
+  std::size_t fitting_prefix_size_ = 0;
+  std::size_t add_candidate_count_ = 0;
+  std::size_t remove_candidate_count_ = 0;
+  std::deque<std::pair<std::size_t, std::size_t>> ban_expirations_;
+  std::vector<std::size_t> ban_until_;
+  std::size_t iteration_ = 0;
+  std::int64_t remaining_capacity_ = 0;
   std::mt19937 random_;
 };
+
+AddCandidate::AddCandidate(KnapsackSpace &space, std::size_t object_index)
+    : space_(space), object_index_(object_index) {
+  space_.Add(object_index_);
+}
+
+void AddCandidate::Reject() { space_.Remove(object_index_, false); }
+
+RemoveCandidate::RemoveCandidate(KnapsackSpace &space, std::size_t object_index)
+    : space_(space), object_index_(object_index) {
+  space_.Remove(object_index_, true);
+}
+
+void RemoveCandidate::Reject() { space_.Add(object_index_, true); }
 
 int main(int argc, char *argv[]) {
   if (argc < 2) {
@@ -324,7 +513,7 @@ int main(int argc, char *argv[]) {
     KnapsackSpace *space_view = space.get();
     Annealer annealer(
         std::move(space),
-        std::make_unique<ExpDecayScheduler>(1.0L, 0.99999L, 0.0001L),
+        std::make_unique<ExpDecayScheduler>(1.0L, 0.999999L, 0.0001L),
         std::make_unique<MetropolisAcceptPolicy>(seed));
     std::unique_ptr<State> solution = annealer.Run();
     const AnnealStats &stats = annealer.Stats();
