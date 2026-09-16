@@ -5,7 +5,6 @@
 #include "optlib/sched.h"
 
 #include <algorithm>
-#include <chrono>
 #include <cmath>
 #include <fstream>
 #include <iostream>
@@ -235,7 +234,6 @@ public:
       }
       replacement_samplers_.emplace_back(std::move(weights));
     }
-    normalization_rank_.assign(sets_.size(), -1);
     state_ = std::make_unique<SetCover>(std::move(covered_by), set_costs_);
   }
 
@@ -334,11 +332,7 @@ public:
   }
 
   Candidate *Next() override {
-    bool normalize = ShouldNormalize();
-    auto start = std::chrono::steady_clock::now();
-    Candidate *candidate = normalize ? Normalize() : RemoveSet();
-    ObserveMoveTime(normalize, std::chrono::steady_clock::now() - start);
-    return candidate;
+    return RemoveSet();
   }
 
 private:
@@ -369,67 +363,6 @@ private:
     pending_ =
         std::make_unique<SetRemovalCandidate>(*state_, std::move(changes));
     return pending_.get();
-  }
-
-  Candidate *Normalize() {
-    std::fill(normalization_rank_.begin(), normalization_rank_.end(), -1);
-    std::vector<int> order = state_->active_sets;
-    std::shuffle(order.begin(), order.end(), random_);
-    for (int rank = 0; rank < static_cast<int>(order.size()); ++rank) {
-      normalization_rank_[order[rank]] = rank;
-    }
-
-    std::vector<std::pair<int, int>> changes;
-    for (int element = 0; element < static_cast<int>(sets_for_element_.size());
-         ++element) {
-      int replacement = state_->covered_by[element];
-      int best_rank = normalization_rank_[replacement];
-      for (int set : sets_for_element_[element]) {
-        int rank = normalization_rank_[set];
-        if (rank != -1 && rank < best_rank) {
-          replacement = set;
-          best_rank = rank;
-        }
-      }
-      if (replacement != state_->covered_by[element]) {
-        changes.emplace_back(element, state_->covered_by[element]);
-        state_->Reassign(element, replacement);
-      }
-    }
-    pending_ =
-        std::make_unique<SetRemovalCandidate>(*state_, std::move(changes));
-    return pending_.get();
-  }
-
-  bool ShouldNormalize() {
-    constexpr long double target_fraction = 0.1L;
-    if (normalization_samples_ == 0) {
-      return std::bernoulli_distribution(0.01)(random_);
-    }
-    if (removal_samples_ == 0) {
-      return false;
-    }
-    long double removal_average = removal_seconds_ / removal_samples_;
-    long double normalization_average =
-        normalization_seconds_ / normalization_samples_;
-    long double probability =
-        target_fraction * removal_average /
-        ((1.0L - target_fraction) * normalization_average +
-         target_fraction * removal_average);
-    return std::bernoulli_distribution(static_cast<double>(probability))(random_);
-  }
-
-  void ObserveMoveTime(bool normalization,
-                       std::chrono::steady_clock::duration elapsed) {
-    long double seconds =
-        std::chrono::duration<long double>(elapsed).count();
-    if (normalization) {
-      normalization_seconds_ += seconds;
-      ++normalization_samples_;
-    } else {
-      removal_seconds_ += seconds;
-      ++removal_samples_;
-    }
   }
 
   int Pick(const std::vector<int> &choices) {
@@ -488,11 +421,6 @@ private:
   std::vector<long double> original_set_costs_;
   std::vector<long double> set_utilities_;
   std::vector<FenwickTree> replacement_samplers_;
-  std::vector<int> normalization_rank_;
-  std::size_t removal_samples_ = 0;
-  std::size_t normalization_samples_ = 0;
-  long double removal_seconds_ = 0;
-  long double normalization_seconds_ = 0;
   std::vector<int> original_set_indices_;
   std::unique_ptr<SetCover> state_;
   std::unique_ptr<SetRemovalCandidate> pending_;
