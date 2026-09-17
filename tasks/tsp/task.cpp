@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <fstream>
@@ -12,6 +13,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <numeric>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -145,6 +147,170 @@ MstWarmStart BuildMstWarmStart(const TspInstance &instance) {
                       .length = mst_length};
 }
 
+long double CrossProduct(const Point &first, const Point &second,
+                         const Point &third) {
+  return (static_cast<long double>(second.x) - first.x) *
+             (static_cast<long double>(third.y) - first.y) -
+         (static_cast<long double>(second.y) - first.y) *
+             (static_cast<long double>(third.x) - first.x);
+}
+
+std::vector<int> ConvexHull(const TspInstance &instance,
+                            std::vector<int> points) {
+  if (points.size() <= 2) {
+    return points;
+  }
+
+  std::sort(points.begin(), points.end(), [&](int first, int second) {
+    const Point &first_point = instance.points[first];
+    const Point &second_point = instance.points[second];
+    if (first_point.x != second_point.x) {
+      return first_point.x < second_point.x;
+    }
+    if (first_point.y != second_point.y) {
+      return first_point.y < second_point.y;
+    }
+    return first < second;
+  });
+
+  std::vector<int> lower;
+  for (int point_index : points) {
+    while (lower.size() >= 2 &&
+           CrossProduct(instance.points[lower[lower.size() - 2]],
+                        instance.points[lower.back()],
+                        instance.points[point_index]) < 0.0L) {
+      lower.pop_back();
+    }
+    lower.push_back(point_index);
+  }
+
+  std::vector<int> upper;
+  for (auto point = points.rbegin(); point != points.rend(); ++point) {
+    while (upper.size() >= 2 &&
+           CrossProduct(instance.points[upper[upper.size() - 2]],
+                        instance.points[upper.back()],
+                        instance.points[*point]) < 0.0L) {
+      upper.pop_back();
+    }
+    upper.push_back(*point);
+  }
+
+  std::vector<int> hull;
+  hull.reserve(lower.size() + upper.size());
+  std::vector<char> added(instance.points.size(), false);
+  for (int point_index : lower) {
+    if (!added[point_index]) {
+      hull.push_back(point_index);
+      added[point_index] = true;
+    }
+  }
+  for (int point_index : upper) {
+    if (!added[point_index]) {
+      hull.push_back(point_index);
+      added[point_index] = true;
+    }
+  }
+  return hull;
+}
+
+double PointDistance(const TspInstance &instance, int first, int second) {
+  const Point &first_point = instance.points[first];
+  const Point &second_point = instance.points[second];
+  return std::hypot(second_point.x - first_point.x,
+                    second_point.y - first_point.y);
+}
+
+std::vector<int> MergeCycles(const TspInstance &instance,
+                             const std::vector<int> &outer,
+                             const std::vector<int> &inner) {
+  if (outer.empty()) {
+    return inner;
+  }
+  if (inner.empty()) {
+    return outer;
+  }
+
+  std::size_t best_outer_edge = 0;
+  std::size_t best_inner_edge = 0;
+  bool reverse_inner = false;
+  double best_delta = std::numeric_limits<double>::infinity();
+
+  for (std::size_t outer_edge = 0; outer_edge < outer.size(); ++outer_edge) {
+    const int outer_first = outer[outer_edge];
+    const int outer_second = outer[(outer_edge + 1) % outer.size()];
+    const double removed_outer =
+        PointDistance(instance, outer_first, outer_second);
+    for (std::size_t inner_edge = 0; inner_edge < inner.size(); ++inner_edge) {
+      const int inner_first = inner[inner_edge];
+      const int inner_second = inner[(inner_edge + 1) % inner.size()];
+      const double removed =
+          removed_outer + PointDistance(instance, inner_first, inner_second);
+
+      const double reversed_delta =
+          PointDistance(instance, outer_first, inner_first) +
+          PointDistance(instance, outer_second, inner_second) - removed;
+      if (reversed_delta < best_delta) {
+        best_delta = reversed_delta;
+        best_outer_edge = outer_edge;
+        best_inner_edge = inner_edge;
+        reverse_inner = true;
+      }
+
+      const double forward_delta =
+          PointDistance(instance, outer_first, inner_second) +
+          PointDistance(instance, outer_second, inner_first) - removed;
+      if (forward_delta < best_delta) {
+        best_delta = forward_delta;
+        best_outer_edge = outer_edge;
+        best_inner_edge = inner_edge;
+        reverse_inner = false;
+      }
+    }
+  }
+
+  std::vector<int> merged;
+  merged.reserve(outer.size() + inner.size());
+  for (std::size_t offset = 1; offset <= outer.size(); ++offset) {
+    merged.push_back(outer[(best_outer_edge + offset) % outer.size()]);
+  }
+  if (reverse_inner) {
+    for (std::size_t offset = 0; offset < inner.size(); ++offset) {
+      merged.push_back(
+          inner[(best_inner_edge + inner.size() - offset) % inner.size()]);
+    }
+  } else {
+    for (std::size_t offset = 1; offset <= inner.size(); ++offset) {
+      merged.push_back(inner[(best_inner_edge + offset) % inner.size()]);
+    }
+  }
+  return merged;
+}
+
+std::vector<int> BuildSpiralWarmStart(const TspInstance &instance) {
+  std::vector<int> remaining(instance.points.size());
+  std::iota(remaining.begin(), remaining.end(), 0);
+  std::vector<std::vector<int>> layers;
+
+  while (!remaining.empty()) {
+    std::vector<int> hull = ConvexHull(instance, remaining);
+    std::vector<char> on_hull(instance.points.size(), false);
+    for (int point_index : hull) {
+      on_hull[point_index] = true;
+    }
+    remaining.erase(
+        std::remove_if(remaining.begin(), remaining.end(),
+                       [&](int point_index) { return on_hull[point_index]; }),
+        remaining.end());
+    layers.push_back(std::move(hull));
+  }
+
+  std::vector<int> tour;
+  for (auto layer = layers.rbegin(); layer != layers.rend(); ++layer) {
+    tour = MergeCycles(instance, *layer, tour);
+  }
+  return tour;
+}
+
 struct TspState : State {
   std::vector<int> point_order;
   const TspInstance *instance;
@@ -207,16 +373,21 @@ bool IsValid(const TspInstance &instance, const TspState &state) {
   return std::abs(state.RawScore() - calculated_length) <= tolerance;
 }
 
-class SwapCandidate : public Candidate {
+class ReverseSegmentCandidate : public Candidate {
 public:
-  SwapCandidate(TspState &state, std::size_t first_position,
-                std::size_t second_position)
-      : state_(state), first_position_(first_position),
-        second_position_(second_position), previous_length_(state.RawScore()) {
+  ReverseSegmentCandidate(TspState &state, std::size_t start,
+                          std::size_t length)
+      : state_(state), start_(start), previous_length_(state.RawScore()) {
     const std::size_t point_count = state_.point_order.size();
-    std::array<std::size_t, 4> affected_positions{
-        (first_position_ + point_count - 1) % point_count, first_position_,
-        (second_position_ + point_count - 1) % point_count, second_position_};
+    previous_points_.assign(state_.point_order.begin() + start_,
+                            state_.point_order.begin() + start_ + length);
+
+    std::vector<std::size_t> affected_positions;
+    affected_positions.reserve(length + 1);
+    affected_positions.push_back((start_ + point_count - 1) % point_count);
+    for (std::size_t offset = 0; offset < length; ++offset) {
+      affected_positions.push_back(start_ + offset);
+    }
     std::sort(affected_positions.begin(), affected_positions.end());
     const auto affected_end =
         std::unique(affected_positions.begin(), affected_positions.end());
@@ -227,8 +398,10 @@ public:
       previous_affected_length += state_.EdgeLengthAt(*position);
     }
 
-    std::swap(state_.point_order[first_position_],
-              state_.point_order[second_position_]);
+    if (length > 1) {
+      std::reverse(state_.point_order.begin() + start_,
+                   state_.point_order.begin() + start_ + length);
+    }
 
     double current_affected_length = 0.0;
     for (auto position = affected_positions.begin(); position != affected_end;
@@ -242,16 +415,182 @@ public:
   void Accept() override {}
 
   void Reject() override {
-    std::swap(state_.point_order[first_position_],
-              state_.point_order[second_position_]);
+    std::copy(previous_points_.begin(), previous_points_.end(),
+              state_.point_order.begin() + start_);
     state_.SetLength(previous_length_);
   }
 
 private:
   TspState &state_;
-  std::size_t first_position_;
-  std::size_t second_position_;
+  std::size_t start_;
   double previous_length_;
+  std::vector<int> previous_points_;
+};
+
+class RegularizeSegmentCandidate : public Candidate {
+public:
+  RegularizeSegmentCandidate(TspState &state, std::size_t start,
+                             std::size_t length)
+      : state_(state), start_(start), previous_length_(state.RawScore()),
+        previous_points_(state_.point_order.begin() + start_,
+                         state_.point_order.begin() + start_ + length) {
+    const std::size_t point_count = state_.point_order.size();
+    const int left = state_.point_order[(start_ + point_count - 1) % point_count];
+    const int right = state_.point_order[(start_ + length) % point_count];
+    const std::size_t state_count = std::size_t{1} << length;
+    const double infinity = std::numeric_limits<double>::infinity();
+
+    std::vector<double> best(state_count * length, infinity);
+    std::vector<std::int8_t> parent(state_count * length, -1);
+    for (std::size_t last = 0; last < length; ++last) {
+      best[(std::size_t{1} << last) * length + last] =
+          PointDistance(*state_.instance, left, previous_points_[last]);
+    }
+
+    for (std::size_t mask = 1; mask < state_count; ++mask) {
+      for (std::size_t last = 0; last < length; ++last) {
+        if ((mask & (std::size_t{1} << last)) == 0) {
+          continue;
+        }
+        const double current = best[mask * length + last];
+        if (!std::isfinite(current)) {
+          continue;
+        }
+        for (std::size_t next = 0; next < length; ++next) {
+          const std::size_t next_bit = std::size_t{1} << next;
+          if ((mask & next_bit) != 0) {
+            continue;
+          }
+          const std::size_t next_mask = mask | next_bit;
+          const double candidate =
+              current + PointDistance(*state_.instance,
+                                      previous_points_[last],
+                                      previous_points_[next]);
+          double &next_best = best[next_mask * length + next];
+          if (candidate < next_best) {
+            next_best = candidate;
+            parent[next_mask * length + next] =
+                static_cast<std::int8_t>(last);
+          }
+        }
+      }
+    }
+
+    const std::size_t full_mask = state_count - 1;
+    std::size_t last = 0;
+    double optimized_length = infinity;
+    for (std::size_t candidate_last = 0; candidate_last < length;
+         ++candidate_last) {
+      const double candidate =
+          best[full_mask * length + candidate_last] +
+          PointDistance(*state_.instance, previous_points_[candidate_last],
+                        right);
+      if (candidate < optimized_length) {
+        optimized_length = candidate;
+        last = candidate_last;
+      }
+    }
+
+    std::size_t mask = full_mask;
+    for (std::size_t position = length; position-- > 0;) {
+      state_.point_order[start_ + position] = previous_points_[last];
+      const std::int8_t previous = parent[mask * length + last];
+      mask ^= std::size_t{1} << last;
+      if (position != 0) {
+        last = static_cast<std::size_t>(previous);
+      }
+    }
+
+    double previous_affected_length =
+        PointDistance(*state_.instance, left, previous_points_.front()) +
+        PointDistance(*state_.instance, previous_points_.back(), right);
+    double current_affected_length =
+        PointDistance(*state_.instance, left,
+                      state_.point_order[start_]) +
+        PointDistance(*state_.instance,
+                      state_.point_order[start_ + length - 1], right);
+    for (std::size_t offset = 1; offset < length; ++offset) {
+      previous_affected_length +=
+          PointDistance(*state_.instance, previous_points_[offset - 1],
+                        previous_points_[offset]);
+      current_affected_length +=
+          PointDistance(*state_.instance,
+                        state_.point_order[start_ + offset - 1],
+                        state_.point_order[start_ + offset]);
+    }
+    state_.SetLength(previous_length_ - previous_affected_length +
+                     current_affected_length);
+  }
+
+  void Accept() override {}
+
+  void Reject() override {
+    std::copy(previous_points_.begin(), previous_points_.end(),
+              state_.point_order.begin() + start_);
+    state_.SetLength(previous_length_);
+  }
+
+private:
+  TspState &state_;
+  std::size_t start_;
+  double previous_length_;
+  std::vector<int> previous_points_;
+};
+
+class GreedyReconstructCandidate : public Candidate {
+public:
+  GreedyReconstructCandidate(TspState &state, std::size_t start,
+                             std::size_t length)
+      : state_(state), previous_length_(state.RawScore()),
+        previous_order_(std::move(state_.point_order)) {
+    const std::size_t point_count = previous_order_.size();
+    std::vector<int> removed_points(previous_order_.begin() + start,
+                                    previous_order_.begin() + start + length);
+
+    state_.point_order.reserve(point_count);
+    state_.point_order.insert(state_.point_order.end(),
+                              previous_order_.begin(),
+                              previous_order_.begin() + start);
+    state_.point_order.insert(state_.point_order.end(),
+                              previous_order_.begin() + start + length,
+                              previous_order_.end());
+
+    double current_length =
+        CalculateTourLength(*state_.instance, state_.point_order);
+    for (int point_index : removed_points) {
+      std::size_t best_edge = 0;
+      double best_delta = std::numeric_limits<double>::infinity();
+      for (std::size_t edge = 0; edge < state_.point_order.size(); ++edge) {
+        const int first = state_.point_order[edge];
+        const int second =
+            state_.point_order[(edge + 1) % state_.point_order.size()];
+        const double delta =
+            PointDistance(*state_.instance, first, point_index) +
+            PointDistance(*state_.instance, point_index, second) -
+            PointDistance(*state_.instance, first, second);
+        if (delta < best_delta) {
+          best_delta = delta;
+          best_edge = edge;
+        }
+      }
+      state_.point_order.insert(state_.point_order.begin() + best_edge + 1,
+                                point_index);
+      current_length += best_delta;
+    }
+    state_.SetLength(current_length);
+  }
+
+  void Accept() override {}
+
+  void Reject() override {
+    state_.point_order = std::move(previous_order_);
+    state_.SetLength(previous_length_);
+  }
+
+private:
+  TspState &state_;
+  double previous_length_;
+  std::vector<int> previous_order_;
 };
 
 class NoOpCandidate : public Candidate {
@@ -281,23 +620,85 @@ public:
       return pending_.get();
     }
 
-    std::uniform_int_distribution<std::size_t> first_distribution(
-        0, point_count - 1);
-    std::uniform_int_distribution<std::size_t> second_distribution(
-        0, point_count - 2);
-    const std::size_t first_position = first_distribution(random_);
-    std::size_t second_position = second_distribution(random_);
-    if (second_position >= first_position) {
-      ++second_position;
+    if (point_count > regularization_window_size_ &&
+        ShouldRegularize()) {
+      std::uniform_int_distribution<std::size_t> start_distribution(
+          0, point_count - regularization_window_size_);
+      const std::size_t start = start_distribution(random_);
+      const auto begin = Clock::now();
+      pending_ = std::make_unique<RegularizeSegmentCandidate>(
+          *state_, start, regularization_window_size_);
+      const auto duration =
+          std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() -
+                                                               begin);
+      regularization_time_ += duration;
+      estimated_regularization_time_ = duration;
+      ++regularization_count_;
+      return pending_.get();
     }
 
-    pending_ = std::make_unique<SwapCandidate>(
-        *state_, first_position, second_position);
+    const double expected_length =
+        std::max(1.0, std::log2(static_cast<double>(point_count)));
+    std::geometric_distribution<std::size_t> length_distribution(
+        1.0 / expected_length);
+    const std::size_t length =
+        std::min(point_count, 1 + length_distribution(random_));
+    std::uniform_int_distribution<std::size_t> start_distribution(
+        0, point_count - length);
+    const std::size_t start = start_distribution(random_);
+
+    if (length <= point_count - 2 && ShouldGreedyReconstruct()) {
+      const auto begin = Clock::now();
+      pending_ = std::make_unique<GreedyReconstructCandidate>(
+          *state_, start, length);
+      const auto duration =
+          std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() -
+                                                               begin);
+      greedy_reconstruction_time_ += duration;
+      estimated_greedy_reconstruction_time_ = duration;
+      ++greedy_reconstruction_count_;
+      return pending_.get();
+    }
+
+    pending_ =
+        std::make_unique<ReverseSegmentCandidate>(*state_, start, length);
     return pending_.get();
   }
 
   bool IsValid(const TspState &state) const {
     return ::IsValid(instance_, state);
+  }
+
+  std::size_t RegularizationCount() const { return regularization_count_; }
+
+  double RegularizationSeconds() const {
+    return std::chrono::duration<double>(regularization_time_).count();
+  }
+
+  double RegularizationShare() const {
+    const auto elapsed = Clock::now() - annealing_start_;
+    if (elapsed <= Clock::duration::zero()) {
+      return 0.0;
+    }
+    return std::chrono::duration<double>(regularization_time_).count() /
+           std::chrono::duration<double>(elapsed).count();
+  }
+
+  std::size_t GreedyReconstructionCount() const {
+    return greedy_reconstruction_count_;
+  }
+
+  double GreedyReconstructionSeconds() const {
+    return std::chrono::duration<double>(greedy_reconstruction_time_).count();
+  }
+
+  double GreedyReconstructionShare() const {
+    const auto elapsed = Clock::now() - annealing_start_;
+    if (elapsed <= Clock::duration::zero()) {
+      return 0.0;
+    }
+    return std::chrono::duration<double>(greedy_reconstruction_time_).count() /
+           std::chrono::duration<double>(elapsed).count();
   }
 
   void WriteSolution(std::ostream &output, const TspState &state) const {
@@ -311,11 +712,44 @@ public:
   }
 
 private:
+  bool ShouldRegularize() {
+    const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        Clock::now() - annealing_start_);
+    if (regularization_time_ + estimated_regularization_time_ > elapsed / 5) {
+      return false;
+    }
+    return regularization_distribution_(random_);
+  }
+
+  bool ShouldGreedyReconstruct() {
+    const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        Clock::now() - annealing_start_);
+    if (greedy_reconstruction_time_ +
+            estimated_greedy_reconstruction_time_ >
+        elapsed / 2) {
+      return false;
+    }
+    return greedy_reconstruction_distribution_(random_);
+  }
+
+  using Clock = std::chrono::steady_clock;
+  static constexpr std::size_t regularization_window_size_ = 10;
   TspInstance instance_;
   MstWarmStart mst_;
   std::unique_ptr<TspState> state_;
   std::unique_ptr<Candidate> pending_;
   std::mt19937 random_;
+  Clock::time_point annealing_start_ = Clock::now();
+  std::chrono::nanoseconds regularization_time_{0};
+  std::chrono::nanoseconds estimated_regularization_time_ =
+      std::chrono::milliseconds(20);
+  std::size_t regularization_count_ = 0;
+  std::bernoulli_distribution regularization_distribution_{1.0 / 1024.0};
+  std::chrono::nanoseconds greedy_reconstruction_time_{0};
+  std::chrono::nanoseconds estimated_greedy_reconstruction_time_ =
+      std::chrono::milliseconds(20);
+  std::size_t greedy_reconstruction_count_ = 0;
+  std::bernoulli_distribution greedy_reconstruction_distribution_{0.5};
 };
 
 int main(int argc, char *argv[]) {
@@ -378,6 +812,14 @@ int main(int argc, char *argv[]) {
               << " initial_score=" << stats.initial_score
               << " final_score=" << stats.final_score
               << " best_score=" << stats.best_score << '\n';
+    std::cerr << "regularization stats: count="
+              << space_view->RegularizationCount()
+              << " seconds=" << space_view->RegularizationSeconds()
+              << " share=" << space_view->RegularizationShare() << '\n';
+    std::cerr << "greedy reconstruction stats: count="
+              << space_view->GreedyReconstructionCount()
+              << " seconds=" << space_view->GreedyReconstructionSeconds()
+              << " share=" << space_view->GreedyReconstructionShare() << '\n';
 
     const auto *tsp_solution = dynamic_cast<const TspState *>(solution.get());
     if (tsp_solution == nullptr || !space_view->IsValid(*tsp_solution)) {
