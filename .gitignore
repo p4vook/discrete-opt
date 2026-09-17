@@ -165,6 +165,15 @@ tasks/coloring/data/*
 !tasks/coloring/data/gc_500_1
 !tasks/coloring/data/gc_1000_5
 
+# Keep only the configured TSP evaluation inputs in version control.
+tasks/tsp/data/*
+!tasks/tsp/data/tsp_51_1
+!tasks/tsp/data/tsp_100_3
+!tasks/tsp/data/tsp_200_2
+!tasks/tsp/data/tsp_574_1
+!tasks/tsp/data/tsp_1889_1
+!tasks/tsp/data/tsp_33810_1
+
 .venv
 env/
 venv/
