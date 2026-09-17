@@ -3,15 +3,45 @@
 set -euo pipefail
 
 repo_dir=$(cd "$(dirname "$0")" && pwd)
-task=setcover
+task=""
 config_file=""
 binary_override=""
 output_override=""
 seed_override=""
 jobs=4
+output_format=text
+
+usage() {
+  cat <<'EOF'
+Usage: ./evaluate.sh [options] [INSTANCE ...]
+
+Options:
+  --task NAME         Evaluate tasks/NAME
+  --config PATH       Use a specific evaluation config
+  --binary PATH       Use a specific solver binary
+  --output-dir PATH   Write solutions and measurements to PATH
+  --jobs N            Run N instances in parallel (default: 4)
+  --seed N            Pass a fixed RNG seed to every solver run
+  --typst             Print the result table as Typst markup
+  --help              Show this help
+
+With no INSTANCE arguments, all instances from the evaluation config are run.
+EOF
+}
+
+require_option_value() {
+  if (($# < 2)) || [[ $2 == --* ]]; then
+    printf 'missing value for %s\n' "$1" >&2
+    exit 1
+  fi
+}
 
 load_config() {
   if [[ -z $config_file ]]; then
+    if [[ -z $task ]]; then
+      printf 'either --task or --config is required\n' >&2
+      exit 1
+    fi
     config_file="$repo_dir/tasks/$task/eval.conf"
   fi
   if [[ ! -f $config_file ]]; then
@@ -27,6 +57,13 @@ load_config() {
       exit 1
       ;;
   esac
+  local instance_count=${#eval_instances[@]}
+  if ((instance_count == 0 ||
+       ${#eval_three_thresholds[@]} != instance_count ||
+       ${#eval_five_thresholds[@]} != instance_count)); then
+    printf 'invalid threshold arrays in %s\n' "$config_file" >&2
+    exit 1
+  fi
 }
 
 points_for() {
@@ -96,19 +133,23 @@ fi
 instances=()
 while (($#)); do
   case $1 in
-    --task) task=$2; shift 2 ;;
-    --config) config_file=$2; shift 2 ;;
-    --jobs) jobs=$2; shift 2 ;;
-    --binary) binary_override=$2; shift 2 ;;
-    --output-dir) output_override=$2; shift 2 ;;
-    --seed) seed_override=$2; shift 2 ;;
-    --help)
-      printf 'usage: %s [--task NAME] [--config PATH] [--jobs N] [--binary PATH] [--output-dir PATH] [--seed N] [INSTANCE ...]\n' "$0"
-      exit 0
-      ;;
+    --task) require_option_value "$@"; task=$2; shift 2 ;;
+    --config) require_option_value "$@"; config_file=$2; shift 2 ;;
+    --jobs) require_option_value "$@"; jobs=$2; shift 2 ;;
+    --binary) require_option_value "$@"; binary_override=$2; shift 2 ;;
+    --output-dir) require_option_value "$@"; output_override=$2; shift 2 ;;
+    --seed) require_option_value "$@"; seed_override=$2; shift 2 ;;
+    --typst) output_format=typst; shift ;;
+    --help) usage; exit 0 ;;
+    --*) printf 'unknown option: %s\n' "$1" >&2; usage >&2; exit 1 ;;
     *) instances+=("$1"); shift ;;
   esac
 done
+
+if [[ ! $jobs =~ ^[1-9][0-9]*$ ]]; then
+  printf 'jobs must be a positive integer: %s\n' "$jobs" >&2
+  exit 1
+fi
 
 load_config
 binary=${binary_override:-"$repo_dir/$eval_binary"}
@@ -125,6 +166,13 @@ if [[ ! -x $binary ]]; then
   exit 1
 fi
 
+for instance in "${instances[@]}"; do
+  if [[ ! -f $instance ]]; then
+    printf 'instance not found: %s\n' "$instance" >&2
+    exit 1
+  fi
+done
+
 mkdir -p "$output_dir"
 
 printf '%s\0' "${instances[@]}" |
@@ -138,7 +186,8 @@ done
 
 total_points=$(awk -F '\t' 'NR > 1 { total += $4 } END { print total + 0 }' "$table")
 max_points=$(( ${#instances[@]} * 5 ))
-{
+
+if [[ $output_format == typst ]]; then
   printf '#table(\n'
   printf '  columns: (1fr, auto, auto, auto),\n'
   printf '  table.header([*Instance*], [*Score*], [*CPU time, s*], [*Points*]),\n'
@@ -149,4 +198,12 @@ max_points=$(( ${#instances[@]} * 5 ))
   done < "$table"
   printf ')\n\n'
   printf '*Total: %s / %s*\n' "$total_points" "$max_points"
-}
+else
+  printf '%-24s %20s %14s %8s\n' 'INSTANCE' 'SCORE' 'CPU, S' 'POINTS'
+  while IFS=$'\t' read -r instance score cpu_seconds points; do
+    [[ $instance == instance ]] && continue
+    printf '%-24s %20s %14s %8s\n' \
+      "$instance" "$score" "$cpu_seconds" "$points"
+  done < "$table"
+  printf '\nTotal: %s / %s\n' "$total_points" "$max_points"
+fi
