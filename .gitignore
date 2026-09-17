@@ -174,6 +174,15 @@ tasks/tsp/data/*
 !tasks/tsp/data/tsp_1889_1
 !tasks/tsp/data/tsp_33810_1
 
+# Keep only the configured VRP evaluation inputs in version control.
+tasks/vrp/data/*
+!tasks/vrp/data/vrp_16_3_1
+!tasks/vrp/data/vrp_26_8_1
+!tasks/vrp/data/vrp_51_5_1
+!tasks/vrp/data/vrp_101_10_1
+!tasks/vrp/data/vrp_200_16_1
+!tasks/vrp/data/vrp_421_41_1
+
 .venv
 env/
 venv/
