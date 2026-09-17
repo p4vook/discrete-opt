@@ -31,10 +31,18 @@ struct ColoringState : State {
   explicit ColoringState(const ColoringInstance &instance_)
       : vertex_order(instance_.vertex_count), instance(&instance_),
         cached_colors_(instance_.vertex_count, -1),
-        color_marks_(instance_.vertex_count, -1) {
+        color_marks_(instance_.vertex_count, -1),
+        availability_weights_(instance_.vertex_count + 1, 0.0L) {
+    if (availability_weights_.size() > 1) {
+      availability_weights_[1] = 1.0L;
+    }
+    for (std::size_t available = 2; available < availability_weights_.size();
+         ++available) {
+      availability_weights_[available] =
+          availability_weights_[available - 1] * 0.5L;
+    }
     std::iota(vertex_order.begin(), vertex_order.end(), 0);
     RecomputeEvaluation();
-    normalization_factor_ = std::max(1, cached_color_count_);
   }
 
   const std::vector<int> &GreedyColoring() const {
@@ -45,7 +53,12 @@ struct ColoringState : State {
   }
 
   double Evaluate() const override {
-    return static_cast<double>(RawScore()) / normalization_factor_;
+    if (!score_valid_) {
+      RecomputeEvaluation();
+    }
+    const long double vertex_count = std::max(1, instance->vertex_count);
+    return static_cast<double>(cached_color_count_ +
+                               cached_availability_penalty_ / vertex_count);
   }
 
   int RawScore() const {
@@ -53,6 +66,13 @@ struct ColoringState : State {
       RecomputeEvaluation();
     }
     return cached_color_count_;
+  }
+
+  long double AvailabilityPenalty() const {
+    if (!score_valid_) {
+      RecomputeEvaluation();
+    }
+    return cached_availability_penalty_;
   }
 
   std::unique_ptr<State> Snapshot() const override {
@@ -64,8 +84,9 @@ struct ColoringState : State {
     colors_valid_ = false;
   }
 
-  void RestoreScore(int score) {
-    cached_color_count_ = score;
+  void RestoreEvaluation(int color_count, long double availability_penalty) {
+    cached_color_count_ = color_count;
+    cached_availability_penalty_ = availability_penalty;
     score_valid_ = true;
     colors_valid_ = false;
   }
@@ -75,14 +96,19 @@ private:
     std::fill(cached_colors_.begin(), cached_colors_.end(), -1);
     std::fill(color_marks_.begin(), color_marks_.end(), -1);
     int color_count = 0;
+    long double availability_penalty = 0.0L;
 
     for (int vertex : vertex_order) {
+      int unavailable_color_count = 0;
       for (int neighbor : instance->neighbors[vertex]) {
         int color = cached_colors_[neighbor];
-        if (color != -1) {
+        if (color != -1 && color_marks_[color] != vertex) {
           color_marks_[color] = vertex;
+          ++unavailable_color_count;
         }
       }
+      const int available_color_count = color_count - unavailable_color_count;
+      availability_penalty += availability_weights_[available_color_count];
 
       int color = 0;
       while (color < color_count && color_marks_[color] == vertex) {
@@ -94,6 +120,7 @@ private:
       cached_colors_[vertex] = color;
     }
     cached_color_count_ = color_count;
+    cached_availability_penalty_ = availability_penalty;
     score_valid_ = true;
     colors_valid_ = true;
   }
@@ -101,9 +128,10 @@ private:
   mutable std::vector<int> cached_colors_;
   mutable std::vector<int> color_marks_;
   mutable int cached_color_count_ = 0;
+  mutable long double cached_availability_penalty_ = 0.0L;
   mutable bool score_valid_ = false;
   mutable bool colors_valid_ = false;
-  int normalization_factor_ = 1;
+  std::vector<long double> availability_weights_;
 };
 
 ColoringInstance ParseInstance(std::istream &input) {
@@ -165,7 +193,8 @@ bool IsValid(const ColoringInstance &instance, const ColoringState &state) {
 class PathCycleCandidate : public Candidate {
 public:
   PathCycleCandidate(ColoringState &state, const std::vector<int> &path)
-      : state_(state), previous_score_(state.RawScore()) {
+      : state_(state), previous_score_(state.RawScore()),
+        previous_availability_penalty_(state.AvailabilityPenalty()) {
     positions_.reserve(path.size());
     previous_vertices_.reserve(path.size());
 
@@ -194,12 +223,13 @@ public:
     for (std::size_t index = 0; index < positions_.size(); ++index) {
       state_.vertex_order[positions_[index]] = previous_vertices_[index];
     }
-    state_.RestoreScore(previous_score_);
+    state_.RestoreEvaluation(previous_score_, previous_availability_penalty_);
   }
 
 private:
   ColoringState &state_;
   int previous_score_;
+  long double previous_availability_penalty_;
   std::vector<int> positions_;
   std::vector<int> previous_vertices_;
 };
@@ -274,7 +304,6 @@ private:
     std::vector<int> path;
 
     int vertex = start_distribution(random_);
-    int previous_vertex = -1;
     path.push_back(vertex);
     visited[vertex] = true;
     const int target_length =
@@ -284,7 +313,7 @@ private:
       const std::vector<int> &neighbors = instance_.neighbors[vertex];
       int eligible_count = 0;
       for (int neighbor : neighbors) {
-        eligible_count += neighbor != previous_vertex;
+        eligible_count += !visited[neighbor];
       }
       if (eligible_count == 0) {
         break;
@@ -295,17 +324,13 @@ private:
       int selected = neighbor_distribution(random_);
       int next_vertex = -1;
       for (int neighbor : neighbors) {
-        if (neighbor != previous_vertex && selected-- == 0) {
+        if (!visited[neighbor] && selected-- == 0) {
           next_vertex = neighbor;
           break;
         }
       }
-      if (visited[next_vertex]) {
-        break;
-      }
       path.push_back(next_vertex);
       visited[next_vertex] = true;
-      previous_vertex = vertex;
       vertex = next_vertex;
     }
     return path;
@@ -368,8 +393,7 @@ int main(int argc, char *argv[]) {
     ColoringSpace *space_view = space.get();
     Annealer annealer(
         std::move(space),
-        std::make_unique<ExpDecayScheduler>(1.0L, 0.99987500183603828L,
-                                            0.00001L),
+        std::make_unique<ExpDecayScheduler>(1.0L, 0.99995L, 0.0001L),
         std::make_unique<MetropolisAcceptPolicy>(seed));
     std::unique_ptr<State> solution = annealer.Run([](const AnnealStats &stats) {
       std::cerr << "anneal progress: elapsed=" << stats.elapsed_seconds
