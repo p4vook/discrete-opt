@@ -13,7 +13,6 @@
 #include <iostream>
 #include <limits>
 #include <memory>
-#include <numeric>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -147,168 +146,11 @@ MstWarmStart BuildMstWarmStart(const TspInstance &instance) {
                       .length = mst_length};
 }
 
-long double CrossProduct(const Point &first, const Point &second,
-                         const Point &third) {
-  return (static_cast<long double>(second.x) - first.x) *
-             (static_cast<long double>(third.y) - first.y) -
-         (static_cast<long double>(second.y) - first.y) *
-             (static_cast<long double>(third.x) - first.x);
-}
-
-std::vector<int> ConvexHull(const TspInstance &instance,
-                            std::vector<int> points) {
-  if (points.size() <= 2) {
-    return points;
-  }
-
-  std::sort(points.begin(), points.end(), [&](int first, int second) {
-    const Point &first_point = instance.points[first];
-    const Point &second_point = instance.points[second];
-    if (first_point.x != second_point.x) {
-      return first_point.x < second_point.x;
-    }
-    if (first_point.y != second_point.y) {
-      return first_point.y < second_point.y;
-    }
-    return first < second;
-  });
-
-  std::vector<int> lower;
-  for (int point_index : points) {
-    while (lower.size() >= 2 &&
-           CrossProduct(instance.points[lower[lower.size() - 2]],
-                        instance.points[lower.back()],
-                        instance.points[point_index]) < 0.0L) {
-      lower.pop_back();
-    }
-    lower.push_back(point_index);
-  }
-
-  std::vector<int> upper;
-  for (auto point = points.rbegin(); point != points.rend(); ++point) {
-    while (upper.size() >= 2 &&
-           CrossProduct(instance.points[upper[upper.size() - 2]],
-                        instance.points[upper.back()],
-                        instance.points[*point]) < 0.0L) {
-      upper.pop_back();
-    }
-    upper.push_back(*point);
-  }
-
-  std::vector<int> hull;
-  hull.reserve(lower.size() + upper.size());
-  std::vector<char> added(instance.points.size(), false);
-  for (int point_index : lower) {
-    if (!added[point_index]) {
-      hull.push_back(point_index);
-      added[point_index] = true;
-    }
-  }
-  for (int point_index : upper) {
-    if (!added[point_index]) {
-      hull.push_back(point_index);
-      added[point_index] = true;
-    }
-  }
-  return hull;
-}
-
 double PointDistance(const TspInstance &instance, int first, int second) {
   const Point &first_point = instance.points[first];
   const Point &second_point = instance.points[second];
   return std::hypot(second_point.x - first_point.x,
                     second_point.y - first_point.y);
-}
-
-std::vector<int> MergeCycles(const TspInstance &instance,
-                             const std::vector<int> &outer,
-                             const std::vector<int> &inner) {
-  if (outer.empty()) {
-    return inner;
-  }
-  if (inner.empty()) {
-    return outer;
-  }
-
-  std::size_t best_outer_edge = 0;
-  std::size_t best_inner_edge = 0;
-  bool reverse_inner = false;
-  double best_delta = std::numeric_limits<double>::infinity();
-
-  for (std::size_t outer_edge = 0; outer_edge < outer.size(); ++outer_edge) {
-    const int outer_first = outer[outer_edge];
-    const int outer_second = outer[(outer_edge + 1) % outer.size()];
-    const double removed_outer =
-        PointDistance(instance, outer_first, outer_second);
-    for (std::size_t inner_edge = 0; inner_edge < inner.size(); ++inner_edge) {
-      const int inner_first = inner[inner_edge];
-      const int inner_second = inner[(inner_edge + 1) % inner.size()];
-      const double removed =
-          removed_outer + PointDistance(instance, inner_first, inner_second);
-
-      const double reversed_delta =
-          PointDistance(instance, outer_first, inner_first) +
-          PointDistance(instance, outer_second, inner_second) - removed;
-      if (reversed_delta < best_delta) {
-        best_delta = reversed_delta;
-        best_outer_edge = outer_edge;
-        best_inner_edge = inner_edge;
-        reverse_inner = true;
-      }
-
-      const double forward_delta =
-          PointDistance(instance, outer_first, inner_second) +
-          PointDistance(instance, outer_second, inner_first) - removed;
-      if (forward_delta < best_delta) {
-        best_delta = forward_delta;
-        best_outer_edge = outer_edge;
-        best_inner_edge = inner_edge;
-        reverse_inner = false;
-      }
-    }
-  }
-
-  std::vector<int> merged;
-  merged.reserve(outer.size() + inner.size());
-  for (std::size_t offset = 1; offset <= outer.size(); ++offset) {
-    merged.push_back(outer[(best_outer_edge + offset) % outer.size()]);
-  }
-  if (reverse_inner) {
-    for (std::size_t offset = 0; offset < inner.size(); ++offset) {
-      merged.push_back(
-          inner[(best_inner_edge + inner.size() - offset) % inner.size()]);
-    }
-  } else {
-    for (std::size_t offset = 1; offset <= inner.size(); ++offset) {
-      merged.push_back(inner[(best_inner_edge + offset) % inner.size()]);
-    }
-  }
-  return merged;
-}
-
-std::vector<int> BuildSpiralWarmStart(const TspInstance &instance) {
-  std::vector<int> remaining(instance.points.size());
-  std::iota(remaining.begin(), remaining.end(), 0);
-  std::vector<std::vector<int>> layers;
-
-  while (!remaining.empty()) {
-    std::vector<int> hull = ConvexHull(instance, remaining);
-    std::vector<char> on_hull(instance.points.size(), false);
-    for (int point_index : hull) {
-      on_hull[point_index] = true;
-    }
-    remaining.erase(
-        std::remove_if(remaining.begin(), remaining.end(),
-                       [&](int point_index) { return on_hull[point_index]; }),
-        remaining.end());
-    layers.push_back(std::move(hull));
-  }
-
-  std::vector<int> tour;
-  for (auto layer = layers.rbegin(); layer != layers.rend(); ++layer) {
-    tour = MergeCycles(instance, *layer, tour);
-  }
-  return tour;
 }
 
 struct TspState : State {
